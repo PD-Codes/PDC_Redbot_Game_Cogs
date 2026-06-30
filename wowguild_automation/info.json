@@ -1,0 +1,14 @@
+{
+  "name": "WoW Guild Automation",
+  "author": ["pd-codes"],
+  "description": "Onboarding, verification and rank sync for WoW guild Discord servers.",
+  "short": "WoW Guild automation",
+  "requirements": [],
+  "tags": ["wow", "guild", "automation", "onboarding"],
+  "type": "COG",
+  "hidden": false,
+  "min_bot_version": "3.5.0",
+  "end_user_data_statement": "Stores per-guild WoW/API and Discord role settings; per-member linked character names, mains, onboarding language, registrations, and ready-times. Bot-owner global config holds Blizzard API client id/secret. Member data is cleared when a user leaves the guild or when admins remove it.",
+  "install_msg": "WoW Guild Automation loaded. Configure roles, channels and onboarding via the web dashboard."
+}
+

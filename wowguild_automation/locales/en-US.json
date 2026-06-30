@@ -1,0 +1,8 @@
+{
+  "onboarding.welcome": "Welcome! Are you a guest or a new guild member?",
+  "onboarding.ask_mainchar": "Please send your main character name.",
+  "onboarding.rules": "Please read the server rules and confirm with the required emoji.",
+  "verification.manual_required": "Manual verification required for {username} as {charname}.",
+  "command.saved": "Saved successfully."
+}
+

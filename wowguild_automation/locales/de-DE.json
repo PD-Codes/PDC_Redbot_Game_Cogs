@@ -1,0 +1,8 @@
+{
+  "onboarding.welcome": "Willkommen! Bist du Gast oder neues Gildenmitglied?",
+  "onboarding.ask_mainchar": "Bitte nenne deinen Mainchar-Namen.",
+  "onboarding.rules": "Bitte lies die Serverregeln und bestätige sie mit dem erforderlichen Emoji.",
+  "verification.manual_required": "Manuelle Verifizierung nötig für {username} als {charname}.",
+  "command.saved": "Erfolgreich gespeichert."
+}
+

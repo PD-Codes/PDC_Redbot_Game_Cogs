@@ -1,0 +1,276 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: karlo-cogs\n"
+"POT-Creation-Date: 2025-05-03 12:21+0000\n"
+"PO-Revision-Date: 2025-05-14 01:42\n"
+"Last-Translator: \n"
+"Language-Team: Serbian (Cyrillic)\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: redgettext 3.4.2\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+"X-Crowdin-Project: karlo-cogs\n"
+"X-Crowdin-Project-ID: 523580\n"
+"X-Crowdin-Language: sr\n"
+"X-Crowdin-File: /warcraftlogsClassic/locales/messages.pot\n"
+"X-Crowdin-File-ID: 10\n"
+"Language: sr_SP\n"
+
+#: warcraftlogsClassic/core.py:33
+#, docstring
+msgid "Retrieve World of Warcraft character information from WarcraftLogs."
+msgstr "Преузмите информације о карактеру Ворлд оф Варцрафт из ВарцрафтЛогс-а."
+
+#: warcraftlogsClassic/core.py:102
+#, docstring
+msgid "\n"
+"        Fetch a character's gear.\n\n"
+"        Examples:\n"
+"        [p]getgear Username Draenor EU\n"
+"        [p]getgear Username Alterac-Mountains US\n\n"
+"        This is provided from the last log entry for a user that includes gear data.\n"
+"        Not every log has gear data.\n"
+"        Enchants can be shown - if the log provides them.\n"
+"        "
+msgstr "\n"
+"        Узми опрему лика.\n\n"
+"        Примери:\n"
+"        [p]гетгеар Корисничко име Драенор ЕУ\n"
+"        [p]гетгеар Корисничко име Алтерац-Моунтаинс УС\n\n"
+"        Ово је обезбеђено из последњег уноса у дневник за корисника који укључује податке о опреми.\n"
+"        Нема сваки дневник податке о опреми.\n"
+"        чари се могу приказати - ако их дневник пружа.\n"
+"        "
+
+#: warcraftlogsClassic/core.py:131 warcraftlogsClassic/core.py:364
+msgid "Please specify a character name with this command."
+msgstr "Молимо наведите име карактера овом командом."
+
+#: warcraftlogsClassic/core.py:138 warcraftlogsClassic/core.py:368
+msgid "Please specify a realm name with this command."
+msgstr "Молимо наведите име области овом командом."
+
+#: warcraftlogsClassic/core.py:147 warcraftlogsClassic/core.py:398
+#: warcraftlogsClassic/core.py:409
+msgid "{name} wasn't found on the API."
+msgstr "{name} није пронађено на АПИ-ју."
+
+#: warcraftlogsClassic/core.py:154
+msgid "The bearer token was invalidated for some reason."
+msgstr "Токен носиоца је из неког разлога поништен."
+
+#: warcraftlogsClassic/core.py:159
+msgid "Check your API token and make sure you have added it to the bot correctly."
+msgstr "Проверите свој АПИ токен и уверите се да сте га исправно додали боту."
+
+#: warcraftlogsClassic/core.py:191
+msgid "No gear for {name} found in the last report."
+msgstr "У последњем извештају није пронађена опрема за {name}."
+
+#: warcraftlogsClassic/core.py:247
+msgid "Unknown (not present in log data from the API)"
+msgstr "Непознато (није присутно у подацима евиденције из АПИ-ја)"
+
+#: warcraftlogsClassic/core.py:261 warcraftlogsClassic/core.py:277
+msgid "Average Item Level: {avg_ilevel}\n"
+msgstr "Просечан ниво предмета: {avg_ilevel}\n"
+
+#: warcraftlogsClassic/core.py:263 warcraftlogsClassic/core.py:279
+msgid "Encounter spec: {encounter_spec}\n"
+msgstr "Спецификација сусрета: {encounter_spec}\n"
+
+#: warcraftlogsClassic/core.py:264 warcraftlogsClassic/core.py:280
+msgid "Gear data pulled from {report_url}\n"
+msgstr "Подаци о зупчаницима извучени од {report_url}\n"
+
+#: warcraftlogsClassic/core.py:267 warcraftlogsClassic/core.py:283
+msgid "Log Date/Time: {datetime} UTC"
+msgstr "Датум/време дневника: {datetime} УТЦ"
+
+#: warcraftlogsClassic/core.py:324
+#, docstring
+msgid "\n"
+"        Character rank overview.\n\n"
+"        If the realm name is two words, use a hyphen to connect the words.\n\n"
+"        Examples:\n"
+"        [p]getrank Username Draenor EU\n"
+"        [p]getrank Username Alterac-Mountains US\n\n"
+"        Specific Zones:\n"
+"        [p]getrank Username Draenor EU CN Heroic\n"
+"        [p]getrank Username Alterac-Mountains US SoD Mythic\n\n"
+"        Zone name must be formatted like:\n"
+"        CN, SoD, SotFO\n"
+"        "
+msgstr ""
+
+#: warcraftlogsClassic/core.py:417
+msgid "Something went terribly wrong while trying to access the zone rankings for this character."
+msgstr "Нешто је пошло по злу док сам покушавао да приступим рангирању зона за овог лика."
+
+#: warcraftlogsClassic/core.py:443
+msgid "Nothing found for {zone_name} for this player."
+msgstr ""
+
+#: warcraftlogsClassic/core.py:448
+msgid "Nothing at all found for this player."
+msgstr ""
+
+#: warcraftlogsClassic/core.py:452
+msgid "Best Perf. Avg"
+msgstr "Најбољи Перф. Авг"
+
+#: warcraftlogsClassic/core.py:455
+msgid "Median Perf. Avg"
+msgstr "Медиан Перф. Авг"
+
+#: warcraftlogsClassic/core.py:464
+msgid "Name"
+msgstr "Име"
+
+#: warcraftlogsClassic/core.py:465
+msgid "Best %"
+msgstr "Најбољи %"
+
+#: warcraftlogsClassic/core.py:466
+msgid "Spec"
+msgstr "Спец"
+
+#: warcraftlogsClassic/core.py:467
+msgid "DPS"
+msgstr "ДПС"
+
+#: warcraftlogsClassic/core.py:468
+msgid "Kills"
+msgstr "Киллс"
+
+#: warcraftlogsClassic/core.py:469
+msgid "Fastest"
+msgstr "Најбржи"
+
+#: warcraftlogsClassic/core.py:470
+msgid "Med %"
+msgstr "средњи %"
+
+#: warcraftlogsClassic/core.py:471
+msgid "AS Pts"
+msgstr "АС Птс"
+
+#: warcraftlogsClassic/core.py:472
+msgid "AS Rank"
+msgstr "АС Ранк"
+
+#: warcraftlogsClassic/core.py:516
+msgid "⫷ Expansion All Stars ⫸"
+msgstr "⫷ Екпансион Алл Старс ⫸"
+
+#: warcraftlogsClassic/core.py:521
+msgid "Points:\n"
+"`{points}`\n"
+msgstr "Поени:\n"
+"`{points}`\n"
+
+#: warcraftlogsClassic/core.py:522
+msgid "Rank:\n"
+"`{rank}`\n"
+msgstr "Ранг:\n"
+"`{rank}`\n"
+
+#: warcraftlogsClassic/core.py:560
+#, docstring
+msgid "Commands for setting up WCL settings."
+msgstr ""
+
+#: warcraftlogsClassic/core.py:565
+#, docstring
+msgid "Set your character's name."
+msgstr "Подесите име свог лика."
+
+#: warcraftlogsClassic/core.py:568
+msgid "Your character name was set to {charname}."
+msgstr "Име вашег лика је постављено на {charname}."
+
+#: warcraftlogsClassic/core.py:573
+#, docstring
+msgid "Set your realm."
+msgstr "Поставите своје царство."
+
+#: warcraftlogsClassic/core.py:576
+msgid "Your realm was set to {realm}."
+msgstr ""
+
+#: warcraftlogsClassic/core.py:580
+#, docstring
+msgid "Set your region."
+msgstr "Подесите свој регион."
+
+#: warcraftlogsClassic/core.py:584
+msgid "Valid regions are: {valid_regions}"
+msgstr "Важећи региони су: {valid_regions}"
+
+#: warcraftlogsClassic/core.py:589
+msgid "Your realm's region was set to {region}."
+msgstr "Регион вашег царства је постављен на {region}."
+
+#: warcraftlogsClassic/core.py:595
+#, docstring
+msgid "Set the channel where WCL updates will be sent."
+msgstr ""
+
+#: warcraftlogsClassic/core.py:598
+msgid "WCL updates will now be sent to {channel}."
+msgstr ""
+
+#: warcraftlogsClassic/core.py:604
+#, docstring
+msgid "Show your current settings."
+msgstr "Прикажите тренутна подешавања."
+
+#: warcraftlogsClassic/core.py:610
+msgid "[Settings for {guild}]\n"
+msgstr ""
+
+#: warcraftlogsClassic/core.py:614
+msgid "Notification channel: {channel}\n"
+msgstr ""
+
+#: warcraftlogsClassic/core.py:617
+msgid "[Settings for {user}]\n"
+msgstr "[Подешавања за {user}]\n"
+
+#: warcraftlogsClassic/core.py:621
+msgid "Character: {charname}\n"
+"Realm: {realmname}\n"
+"Region: {regionname}\n\n"
+msgstr "Карактер: {charname}\n"
+"Краљевство: {realmname}\n"
+"Регион: {regionname}\n\n"
+
+#: warcraftlogsClassic/core.py:625
+msgid "[Bot Permissions Needed]\n"
+msgstr "[Потребне су дозволе за бот]\n"
+
+#: warcraftlogsClassic/core.py:627
+msgid "[X] Embed Links permissions\n"
+msgstr "[X] дозвола за уградњу линкова\n"
+
+#: warcraftlogsClassic/core.py:629
+msgid "[ ] I need Embed Links permissions\n"
+msgstr "[ ] Потребне су ми дозволе за уградњу веза\n"
+
+#: warcraftlogsClassic/core.py:636
+#, docstring
+msgid "Instructions for setting the api key."
+msgstr "Упутства за подешавање апи кључа."
+
+#: warcraftlogsClassic/core.py:637
+msgid "Set your API key by adding it to Red's API key storage.\n"
+"Get a key from <https://classic.warcraftlogs.com> by signing up for an account, then visit your settings.\n"
+"At the bottom is a section called Web API. Click on the blue link that says `manage your V2 clients here`.\n"
+"Do NOT sign up for a v1 API key, it will not work with this cog.\n"
+"Click on Create Client. Be ready to write down your information somewhere, you cannot retrieve the secret after this.\n"
+"Enter a name (whatever you want), `https://localhost` for the redirect URL, and leave the Public Client box unchecked.\n"
+"Use `{prefix}set api warcraftlogs client_id,client-id-goes-here client_secret,client-secret-goes-here` to set your key.\n"
+" "
+msgstr ""
+

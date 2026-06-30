@@ -1,0 +1,13 @@
+{
+  "name": "WoWTokenTracker",
+  "short": "Track the WoW Token price over time (retail + classic) with history.",
+  "description": "Periodically records the WoW Token price per region (retail and optionally classic) and shows the current price plus history (24h/7d change, min/max). Uses the shared Blizzard API key. A dashboard chart is planned. Bilingual (DE/EN).",
+  "author": ["pd-codes"],
+  "required_cogs": {},
+  "requirements": [],
+  "tags": ["wow", "token", "history", "dashboard"],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "disabled": false,
+  "type": "COG"
+}

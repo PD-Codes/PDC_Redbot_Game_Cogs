@@ -1,0 +1,13 @@
+{
+  "name": "TriviaGame",
+  "short": "Trivia game (command: quiz) with its own question DB and a leaderboard.",
+  "description": "A trivia/quiz game with a per-guild question database (managed from the web dashboard), points and a leaderboard. Uses the 'quiz' command to avoid clashing with Red's core Trivia. Opt-in per guild, bilingual (DE/EN).",
+  "author": ["pd-codes"],
+  "required_cogs": {},
+  "requirements": [],
+  "tags": ["fun", "trivia", "quiz", "game", "dashboard"],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "disabled": false,
+  "type": "COG"
+}

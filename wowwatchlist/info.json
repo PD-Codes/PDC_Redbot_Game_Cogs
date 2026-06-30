@@ -1,0 +1,21 @@
+{
+  "name": "WoWWatchlist",
+  "short": "Track WoW characters and post weekly Mythic+ / raid progress (raider.io).",
+  "description": "Keep a watchlist of WoW characters and post a weekly summary of their Mythic+ score and raid progression via raider.io. Characters are managed from the web dashboard. Opt-in per guild, bilingual (DE/EN).",
+  "author": [
+    "pd-codes"
+  ],
+  "required_cogs": {},
+  "requirements": [],
+  "tags": [
+    "wow",
+    "raiderio",
+    "mythicplus",
+    "raid",
+    "dashboard"
+  ],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "disabled": false,
+  "type": "COG"
+}
