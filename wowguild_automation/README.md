@@ -7,9 +7,9 @@ This cog provides WoW guild onboarding, verification, and rank synchronization f
 Example with a local/path repo:
 
 1. Add repo
-   - `[p]repo add dks <repo_url_or_path>`
+   - `[p]repo add pdc-game-cogs https://github.com/PD-Codes/PDC_Redbot_Game_Cogs`
 2. Install cog
-   - `[p]cog install dks wowguild-automation`
+   - `[p]cog install pdc-game-cogs wowguild-automation`
 3. Load cog
    - `[p]load wowguild-automation`
 
