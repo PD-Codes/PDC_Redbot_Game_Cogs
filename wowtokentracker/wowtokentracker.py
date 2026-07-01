@@ -23,10 +23,15 @@ from redbot.core import Config, commands
 from redbot.core.bot import Red
 
 from .pdc_dashboard import (
+    Component,
+    Control,
     L,
+    PageSchema,
     WidgetData,
+    dashboard_page,
     dashboard_widget,
     register_dashboard,
+    tr,
     unregister_dashboard,
 )
 
@@ -92,6 +97,67 @@ class WoWTokenTracker(commands.Cog):
             data = [None] * max(0, n - len(data)) + data[-n:]
             series.append({"label": key, "data": data})
         return WidgetData.chart(series, chart_type="line", labels=labels)
+
+    # ------------------------------------------------------------------ #
+    # Dashboard: full page (retail + classic charts, region dropdown)
+    # ------------------------------------------------------------------ #
+    @dashboard_page(
+        "tokens",
+        L("WoW Token", "WoW Token"),
+        scope="global",
+        permission="authenticated",
+        icon="coins",
+        description=L("Token-Preisverlauf (Retail & Classic)", "Token price history (retail & classic)"),
+    )
+    async def token_page(self, ctx):
+        hist = await self.config.history()
+        tracked = await self.config.regions()
+        # Regions that actually have data (retail or classic); fall back to tracked/config.
+        regions = [r for r in _REGIONS if any(k.endswith(f":{r}") for k in hist)]
+        if not regions:
+            regions = tracked or ["eu"]
+        sel = (ctx.params or {}).get("region") or regions[0]
+        if sel not in regions:
+            sel = regions[0]
+
+        controls = [
+            Control.select(
+                "region",
+                L("Region", "Region"),
+                [{"value": r, "label": r.upper()} for r in regions],
+                value=sel,
+            )
+        ]
+
+        comps = [Component.heading(f"WoW Token \u2014 {sel.upper()}")]
+        for game in ("retail", "classic"):
+            points = hist.get(f"{game}:{sel}") or []
+            title = "Retail" if game == "retail" else "Classic"
+            if points:
+                labels = [
+                    datetime.datetime.utcfromtimestamp(int(ts)).strftime("%m-%d %H:%M")
+                    for ts, _ in points
+                ]
+                data = [round(int(p) / 10000) for _, p in points]
+                comps.append(
+                    Component.chart(
+                        labels=labels,
+                        series=[{"label": title, "data": data}],
+                        title=title,
+                        height=280,
+                    )
+                )
+            else:
+                comps.append(
+                    Component.text(
+                        tr(
+                            ctx,
+                            f"Keine {title}-Daten für {sel.upper()}.",
+                            f"No {title} data for {sel.upper()}.",
+                        )
+                    )
+                )
+        return PageSchema(components=comps, controls=controls)
 
     # ------------------------------------------------------------------ #
     # Blizzard API

@@ -45,6 +45,11 @@ Cogs are used on my private Discord and are mostly in German :D
 
 ## 🌐 Web Dashboard Integration
 
+**wowtokentracker** registers a global **dashboard page** (menu: *Module (Cog) Sites*)
+with Retail + Classic charts and a **region dropdown** (server-driven), in addition to
+its board widget.
+
+
 Some of these cogs feature **native integration with AAA3A's Red-Web-Dashboard** and the
 PDC Web Dashboard, so you can manage them from your browser instead of Discord commands:
 
