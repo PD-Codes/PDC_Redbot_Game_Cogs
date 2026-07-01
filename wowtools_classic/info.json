@@ -1,10 +1,16 @@
 {
     "name": "WoWToolsClassic",
-    "author": ["Karlo","pd-codes"],
+    "author": [
+        "Karlo",
+        "Domekologe"
+    ],
     "description": "CLASSIC version of WoWTools. Cog for interacting with World of Warcraft Classic (MoP Classic) APIs. Loads alongside the retail WoWTools cog; all commands are prefixed with wowtc-.",
     "short": "CLASSIC version of WoWTools for World of Warcraft Classic.",
     "install_msg": "Make sure you check out `[p]help wowset` after loading this cog and set all your settings as most of the commands won't work otherwise.",
-    "tags": ["warcraft", "world of warcraft"],
+    "tags": [
+        "warcraft",
+        "world of warcraft"
+    ],
     "requirements": [
         "tabulate",
         "aiolimiter",
@@ -19,5 +25,11 @@
     "max_bot_version": "3.6.0.dev0",
     "type": "COG",
     "end_user_data_statement": "This cog can store the name, realm and region of a Discord user's World of Warcraft character. This data is used to fetch information about the character from the Blizzard and classic.raider.io APIs.",
-    "min_python_version": [3, 10, 0]
+    "min_python_version": [
+        3,
+        10,
+        0
+    ],
+    "hidden": false,
+    "disabled": false
 }

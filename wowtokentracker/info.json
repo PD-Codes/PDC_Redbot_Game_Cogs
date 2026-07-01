@@ -1,13 +1,22 @@
 {
-  "name": "WoWTokenTracker",
-  "short": "Track the WoW Token price over time (retail + classic) with history.",
-  "description": "Periodically records the WoW Token price per region (retail and optionally classic) and shows the current price plus history (24h/7d change, min/max). Uses the shared Blizzard API key. A dashboard chart is planned. Bilingual (DE/EN).",
-  "author": ["pd-codes"],
-  "required_cogs": {},
-  "requirements": [],
-  "tags": ["wow", "token", "history", "dashboard"],
-  "min_bot_version": "3.5.0",
-  "hidden": false,
-  "disabled": false,
-  "type": "COG"
+    "name": "WoWTokenTracker",
+    "short": "Track the WoW Token price over time (retail + classic) with history.",
+    "description": "Periodically records the WoW Token price per region (retail and optionally classic) and shows the current price plus history (24h/7d change, min/max). Uses the shared Blizzard API key. A dashboard chart is planned. Bilingual (DE/EN).",
+    "author": [
+        "Domekologe"
+    ],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": [
+        "wow",
+        "token",
+        "history",
+        "dashboard"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG",
+    "install_msg": "Thanks for installing WoWTokenTracker!\n\nLoad it with `[p]load wowtokentracker`, then configure it via its commands or the PDC web dashboard (if installed).",
+    "end_user_data_statement": "This cog does not store any personal data about users. It stores only WoW Token price history and per-server configuration."
 }

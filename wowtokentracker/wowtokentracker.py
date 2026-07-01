@@ -52,8 +52,8 @@ class WoWTokenTracker(commands.Cog):
         self.config = Config.get_conf(self, identifier=0x70E_71_C, force_registration=True)
         self.config.register_global(
             enabled=True,
-            regions=["eu"],
-            classic=False,
+            regions=["eu", "us", "kr", "tw"],
+            classic=True,
             history={},  # "game:region" -> [[ts, price_copper], ...]
             language="en-US",
         )
@@ -111,11 +111,12 @@ class WoWTokenTracker(commands.Cog):
     )
     async def token_page(self, ctx):
         hist = await self.config.history()
-        tracked = await self.config.regions()
-        # Regions that actually have data (retail or classic); fall back to tracked/config.
-        regions = [r for r in _REGIONS if any(k.endswith(f":{r}") for k in hist)]
+        tracked = set(await self.config.regions() or [])
+        # Show all tracked regions plus any that already have data, in canonical order.
+        have_data = {r for r in _REGIONS if any(k.endswith(f":{r}") for k in hist)}
+        regions = [r for r in _REGIONS if r in (tracked | have_data)]
         if not regions:
-            regions = tracked or ["eu"]
+            regions = ["eu"]
         sel = (ctx.params or {}).get("region") or regions[0]
         if sel not in regions:
             sel = regions[0]

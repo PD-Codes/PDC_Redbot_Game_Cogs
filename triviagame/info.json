@@ -1,13 +1,23 @@
 {
-  "name": "TriviaGame",
-  "short": "Trivia game (command: quiz) with its own question DB and a leaderboard.",
-  "description": "A trivia/quiz game with a per-guild question database (managed from the web dashboard), points and a leaderboard. Uses the 'quiz' command to avoid clashing with Red's core Trivia. Opt-in per guild, bilingual (DE/EN).",
-  "author": ["pd-codes"],
-  "required_cogs": {},
-  "requirements": [],
-  "tags": ["fun", "trivia", "quiz", "game", "dashboard"],
-  "min_bot_version": "3.5.0",
-  "hidden": false,
-  "disabled": false,
-  "type": "COG"
+    "name": "TriviaGame",
+    "short": "Trivia game (command: quiz) with its own question DB and a leaderboard.",
+    "description": "A trivia/quiz game with a per-guild question database (managed from the web dashboard), points and a leaderboard. Uses the 'quiz' command to avoid clashing with Red's core Trivia. Opt-in per guild, bilingual (DE/EN).",
+    "author": [
+        "Domekologe"
+    ],
+    "required_cogs": {},
+    "requirements": [],
+    "tags": [
+        "fun",
+        "trivia",
+        "quiz",
+        "game",
+        "dashboard"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "type": "COG",
+    "install_msg": "Thanks for installing TriviaGame!\n\nLoad it with `[p]load triviagame`, then configure it via its commands or the PDC web dashboard (if installed).",
+    "end_user_data_statement": "This cog stores the Discord user IDs and scores of players on its per-server leaderboard, plus the server's question set. Leaderboard data can be reset by a server admin."
 }

@@ -1,0 +1,9 @@
+{
+    "author": [
+        "Domekologe"
+    ],
+    "name": "PDC_Redbot_Game_Cogs",
+    "short": "Game-specific cogs (World of Warcraft, Trivia) for Red-DiscordBot by Domekologe.",
+    "description": "Game-specific cogs for Red-DiscordBot, focused on World of Warcraft (Warcraft Logs, WoW Tools, token tracker, guild automation, watchlist) and a trivia game. General-purpose cogs live in the separate PDC_Redbot_Cogs repo.",
+    "install_msg": "Thanks for adding the PDC_Redbot_Game_Cogs repo!\n\nBrowse cogs with `[p]cog list <repo>` and install one with `[p]cog install <repo> <cog>`."
+}
