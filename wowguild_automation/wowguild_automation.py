@@ -336,7 +336,7 @@ class WowGuildAutomation(commands.Cog):
                     [{"value": "retail", "label": "Retail"}, {"value": "classic", "label": "Classic"}],
                     value=s.get("default_version", "retail"),
                 ),
-                Field.text("default_language", "Default language", value=s.get("default_language", "de-DE")),
+                Field.text("default_language", "Default language", value=s.get("default_language", "en-US")),
             ],
         )
 
@@ -490,7 +490,7 @@ class WowGuildAutomation(commands.Cog):
                 Field.select(
                     "language", "Language",
                     [{"value": "de-DE", "label": "Deutsch"}, {"value": "en-US", "label": "English"}],
-                    value=str(language or "de-DE"),
+                    value=str(language or "en-US"),
                 ),
                 Field.text(
                     "new_profile_key", "New profile (key)", value="",
@@ -506,7 +506,7 @@ class WowGuildAutomation(commands.Cog):
 
     @wga_profile_panel.on_submit
     async def _wga_profile_submit(self, ctx, data):
-        await self.config.guild(ctx.guild).language.set(str(data.get("language", "de-DE")).strip() or "de-DE")
+        await self.config.guild(ctx.guild).language.set(str(data.get("language", "en-US")).strip() or "en-US")
         new_key = str(data.get("new_profile_key", "")).strip()
         region = str(data.get("region", "")).strip()
         version = str(data.get("version", "retail")).strip() or "retail"
@@ -2200,7 +2200,7 @@ class WowGuildAutomation(commands.Cog):
                 if method.upper() == "GET":
                     form.client_id.data = bot_setup.get("client_id", "")
                     form.client_secret.data = bot_setup.get("client_secret", "")
-                    form.default_language.data = bot_setup.get("default_language", "de-DE")
+                    form.default_language.data = bot_setup.get("default_language", "en-US")
                     form.default_region.data = bot_setup.get("default_region", "eu")
                     form.default_version.data = bot_setup.get("default_version", "retail")
                     form.dashboard_enabled.data = bool(bot_setup.get("dashboard_enabled", True))
@@ -2208,7 +2208,7 @@ class WowGuildAutomation(commands.Cog):
                 if form.validate_on_submit():
                     lang = str(form.default_language.data).strip()
                     if lang not in ("de-DE", "en-US"):
-                        lang = "de-DE"
+                        lang = "en-US"
                     bot_setup["client_id"] = str(form.client_id.data or "").strip()
                     bot_setup["client_secret"] = str(form.client_secret.data or "").strip()
                     bot_setup["default_language"] = lang
@@ -2287,7 +2287,7 @@ class WowGuildAutomation(commands.Cog):
                         f"<pre>{json.dumps(bot_setup, indent=2)}</pre>"
                         "<h3>Payload Example</h3>"
                         "<pre>{\n"
-                        '  "default_language": "de-DE",\n'
+                        '  "default_language": "en-US",\n'
                         '  "default_region": "eu",\n'
                         '  "default_version": "retail",\n'
                         '  "dashboard_enabled": true\n'
@@ -2508,7 +2508,7 @@ class WowGuildAutomation(commands.Cog):
                 form.rank_lock_notify_channel_id.choices = channel_choices
                 tmpl = cfg.get("templates", {})
                 if method.upper() == "GET":
-                    form.language.data = cfg.get("language", "de-DE")
+                    form.language.data = cfg.get("language", "en-US")
                     form.profile_key.data = active_key
                     form.new_profile_version.data = (
                         missing_versions[0] if missing_versions else "__none__"
@@ -2764,7 +2764,7 @@ class WowGuildAutomation(commands.Cog):
                         profile_key = str(form.profile_key.data or form.version.data or "retail").strip().lower()
                     bot_setup = await self.config.bot_setup()
                     default_region = str(bot_setup.get("default_region", "eu")).strip().lower()
-                    default_language = bot_setup.get("default_language", "de-DE")
+                    default_language = bot_setup.get("default_language", "en-US")
                     if default_language in ("de-DE", "en-US"):
                         cfg["language"] = default_language
                     profile = {

@@ -69,7 +69,7 @@ def _norm_time(s: Optional[str]) -> Optional[str]:
 
 
 def format_day_line(key: str, cell: Dict[str, Any], lang: str = "en-US") -> str:
-    labels = DAY_LABEL_EN if str(lang).startswith("en") else DAY_LABEL_DE
+    labels = DAY_LABEL_DE if str(lang).startswith("de") else DAY_LABEL_EN
     label = labels.get(key, key)
     if not cell.get("can"):
         return f"**{label}:** —"
@@ -127,7 +127,7 @@ class ReadyDayModal(discord.ui.Modal):
         day_key: str,
         lang: str = "en-US",
     ) -> None:
-        labels = DAY_LABEL_EN if str(lang).startswith("en") else DAY_LABEL_DE
+        labels = DAY_LABEL_DE if str(lang).startswith("de") else DAY_LABEL_EN
         label = labels.get(day_key, day_key)
         super().__init__(title=tr_lang(lang, f"{label} — Bereitschaft", f"{label} — availability"))
         self.cog = cog
@@ -154,7 +154,7 @@ class ReadyDayModal(discord.ui.Modal):
         data = _merge_ready_times(raw)
         data[self.day_key] = {"can": can, "start": st, "end": en}
         await self.cog.config.member(self.member).ready_times.set(data)
-        labels = DAY_LABEL_EN if str(glang).startswith("en") else DAY_LABEL_DE
+        labels = DAY_LABEL_DE if str(glang).startswith("de") else DAY_LABEL_EN
         label = labels.get(self.day_key, self.day_key)
         await interaction.response.send_message(
             f"{label} {tr_lang(glang, 'gespeichert', 'saved')}: "
@@ -170,7 +170,7 @@ class MemberReadyTimesView(discord.ui.View):
         self.member = member
         self.lang = lang
         self._day_key = "monday"
-        day_labels = DAY_LABEL_EN if str(lang).startswith("en") else DAY_LABEL_DE
+        day_labels = DAY_LABEL_DE if str(lang).startswith("de") else DAY_LABEL_EN
         opts = [
             discord.SelectOption(label=day_labels[k], value=k, default=(k == "monday"))
             for k in DAY_KEYS
