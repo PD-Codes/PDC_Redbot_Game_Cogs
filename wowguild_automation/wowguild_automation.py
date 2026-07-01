@@ -2745,7 +2745,7 @@ class WowGuildAutomation(commands.Cog):
                     }
 
                 if form.validate_on_submit():
-                    cfg["language"] = form.language.data if form.language.data in ("de-DE", "en-US") else "de-DE"
+                    cfg["language"] = form.language.data if form.language.data in ("de-DE", "en-US") else "en-US"
                     if form.profile_key.data == "__new__":
                         selected_new = str(form.new_profile_version.data or "").strip().lower()
                         if selected_new == "__none__" or selected_new not in missing_versions:

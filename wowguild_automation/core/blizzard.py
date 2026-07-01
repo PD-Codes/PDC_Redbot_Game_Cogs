@@ -7,5 +7,5 @@ class GuildSettingsInput:
     version: str
     realm: str
     guild_name: str
-    language: str = "de-DE"
+    language: str = "en-US"
 

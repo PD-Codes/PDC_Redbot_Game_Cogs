@@ -189,7 +189,7 @@ class CharMainMenuView(discord.ui.View):
         )
 
     @staticmethod
-    def _remove_caption(ordered: List[Dict[str, str]], page: int, lang: str = "de-DE") -> str:
+    def _remove_caption(ordered: List[Dict[str, str]], page: int, lang: str = "en-US") -> str:
         total_pages = max(1, (len(ordered) + LINKED_PAGE_SIZE - 1) // LINKED_PAGE_SIZE)
         return tr_lang(
             lang,
@@ -571,7 +571,7 @@ class LinkedMainPageView(discord.ui.View):
         b_search.callback = self._search
         self.add_item(b_search)
 
-    def _caption(self, lang: str = "de-DE") -> str:
+    def _caption(self, lang: str = "en-US") -> str:
         tp = max(1, (len(self.ordered) + LINKED_PAGE_SIZE - 1) // LINKED_PAGE_SIZE)
         return tr_lang(
             lang,
@@ -855,7 +855,7 @@ class LinkedRemovePageView(discord.ui.View):
             b2.callback = self._next
             self.add_item(b2)
 
-    def _cap_self(self, lang: str = "de-DE") -> str:
+    def _cap_self(self, lang: str = "en-US") -> str:
         tp = max(1, (len(self.ordered) + LINKED_PAGE_SIZE - 1) // LINKED_PAGE_SIZE)
         acc = len(self.accumulated)
         return tr_lang(
@@ -870,7 +870,7 @@ class LinkedRemovePageView(discord.ui.View):
             ),
         )
 
-    def _cap_officer(self, lang: str = "de-DE") -> str:
+    def _cap_officer(self, lang: str = "en-US") -> str:
         assert self.target is not None
         tp = max(1, (len(self.ordered) + LINKED_PAGE_SIZE - 1) // LINKED_PAGE_SIZE)
         acc = len(self.accumulated)
@@ -886,7 +886,7 @@ class LinkedRemovePageView(discord.ui.View):
             ),
         )
 
-    def _caption(self, lang: str = "de-DE") -> str:
+    def _caption(self, lang: str = "en-US") -> str:
         return self._cap_officer(lang) if self.officer_mode else self._cap_self(lang)
 
     async def _to_menu(self, interaction: discord.Interaction) -> None:

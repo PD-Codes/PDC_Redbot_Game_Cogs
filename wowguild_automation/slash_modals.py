@@ -26,7 +26,7 @@ class GuildSettingsModal(discord.ui.Modal, title="WoW-Gildenprofil (aktives Prof
     language = discord.ui.TextInput(
         label="Bot-Sprache",
         placeholder="de-DE oder en-US",
-        default="de-DE",
+        default="en-US",
         max_length=8,
         required=True,
     )
@@ -49,7 +49,7 @@ class GuildSettingsModal(discord.ui.Modal, title="WoW-Gildenprofil (aktives Prof
             return
         lang = str(self.language.value).strip()
         if lang not in ("de-DE", "en-US"):
-            lang = "de-DE"
+            lang = "en-US"
         version_key = str(self.version.value).lower().strip().replace("-", "_")
         if version_key in ("mop", "classic_mop"):
             version_key = "mop_classic"
@@ -111,7 +111,7 @@ class BotSetupModal(discord.ui.Modal, title="Blizzard API (Bot-Besitzer)"):
 
 
 class MasterSetupModal(discord.ui.Modal, title="Globale Defaults"):
-    default_language = discord.ui.TextInput(label="Sprache", default="de-DE", max_length=8, required=True)
+    default_language = discord.ui.TextInput(label="Sprache", default="en-US", max_length=8, required=True)
     default_region = discord.ui.TextInput(label="Region", default="eu", max_length=8, required=True)
     default_version = discord.ui.TextInput(label="Version", default="retail", max_length=32, required=True)
     dashboard_enabled = discord.ui.TextInput(
@@ -141,7 +141,7 @@ class MasterSetupModal(discord.ui.Modal, title="Globale Defaults"):
             return
         lang = str(self.default_language.value).strip()
         if lang not in ("de-DE", "en-US"):
-            lang = "de-DE"
+            lang = "en-US"
         en = str(self.dashboard_enabled.value).lower().strip() in ("ja", "yes", "true", "1", "on")
         data = await self.cog.config.bot_setup()
         data["default_language"] = lang

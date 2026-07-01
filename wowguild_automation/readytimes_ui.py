@@ -68,7 +68,7 @@ def _norm_time(s: Optional[str]) -> Optional[str]:
     return None
 
 
-def format_day_line(key: str, cell: Dict[str, Any], lang: str = "de-DE") -> str:
+def format_day_line(key: str, cell: Dict[str, Any], lang: str = "en-US") -> str:
     labels = DAY_LABEL_EN if str(lang).startswith("en") else DAY_LABEL_DE
     label = labels.get(key, key)
     if not cell.get("can"):
@@ -89,7 +89,7 @@ def _hhmm_to_min(s: str) -> int:
     return int(h) * 60 + int(m)
 
 
-def format_member_ready_times_block(raw: Any, lang: str = "de-DE") -> str:
+def format_member_ready_times_block(raw: Any, lang: str = "en-US") -> str:
     data = _merge_ready_times(raw)
     lines = [format_day_line(k, data[k], lang) for k in DAY_KEYS]
     return "\n".join(lines)
