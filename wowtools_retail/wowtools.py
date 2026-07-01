@@ -167,7 +167,7 @@ class WoWTools(
         raiderio_api_key = await self.bot.get_shared_api_tokens("raiderio")
         self.raiderio_api = RaiderIO(api_key=raiderio_api_key.get("api_key"))
         await self.create_bnet_objs()
-        dashboard = self.bot.get_cog("WebDashboard") or self.bot.get_cog("Dashboard")
+        dashboard = self.bot.get_cog("pdc_webdashboard") or self.bot.get_cog("WebDashboard") or self.bot.get_cog("Dashboard")
         if dashboard is not None:
             try:
                 dashboard.rpc.third_parties_handler.add_third_party(self, overwrite=True)  # type: ignore[attr-defined]
@@ -695,7 +695,7 @@ class WoWTools(
         # Compatibility path for Dashboard variants that do not dispatch `dashboard_cog_add`.
         if self._dashboard_attached:
             return
-        if cog.qualified_name not in {"Dashboard", "WebDashboard"}:
+        if cog.qualified_name not in {"Dashboard", "WebDashboard", "pdc_webdashboard"}:
             return
         try:
             cog.rpc.third_parties_handler.add_third_party(self, overwrite=True)  # type: ignore[attr-defined]
