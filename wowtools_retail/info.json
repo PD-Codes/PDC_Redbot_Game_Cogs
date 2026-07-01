@@ -6,7 +6,7 @@
     ],
     "description": "WoW Retail tools for interacting with various World of Warcraft Retail APIs (Blizzard, Raider.IO).",
     "short": "WoW Retail tools for interacting with World of Warcraft Retail.",
-    "install_msg": "Make sure you check out `[p]help wowset` after loading this cog and set all your settings as most of the commands won't work otherwise.",
+    "install_msg": "Make sure you check out `[p]help wowset` after loading this cog and set all your settings as most of the commands won't work otherwise.\n\nThis cog queries outside services (Blizzard API and Raider.IO) and needs Blizzard API credentials.",
     "tags": [
         "warcraft",
         "world of warcraft"

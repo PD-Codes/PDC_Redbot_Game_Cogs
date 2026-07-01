@@ -316,6 +316,7 @@ class RaidInfo(commands.Cog):
         extension: Optional[str] = None,
         private: bool = True,
     ):
+        """Show current raid-progress information for a character."""
         game = "retail"
         if ctx.interaction:
             await set_contextual_locales_from_guild(self.bot, ctx.guild)

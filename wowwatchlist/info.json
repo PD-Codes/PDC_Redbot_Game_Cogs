@@ -18,6 +18,6 @@
     "hidden": false,
     "disabled": false,
     "type": "COG",
-    "install_msg": "Thanks for installing WoWWatchlist!\n\nLoad it with `[p]load wowwatchlist`, then configure it via its commands or the PDC web dashboard (if installed).",
+    "install_msg": "Thanks for installing WoWWatchlist!\n\nLoad it with `[p]load wowwatchlist`, then configure it via its commands or the PDC web dashboard (if installed).\n\nThis cog queries an outside service (Raider.IO).",
     "end_user_data_statement": "This cog stores per-server configuration and the World of Warcraft character names being tracked. It does not persistently store personal data about Discord users."
 }

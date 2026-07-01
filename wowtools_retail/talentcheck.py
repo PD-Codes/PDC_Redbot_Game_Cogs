@@ -111,6 +111,7 @@ class TalentCheck(commands.Cog):
         locale: str = "en",
         private: bool = True,
     ):
+        """Show a World of Warcraft character's talents."""
         game = "retail"
         if ctx.interaction:
             await set_contextual_locales_from_guild(self.bot, ctx.guild)

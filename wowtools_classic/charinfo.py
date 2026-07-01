@@ -131,6 +131,7 @@ class CharInfo(commands.Cog):
         locale: str = "en",
         private: bool = True,
     ):
+        """Show general World of Warcraft character information."""
         game = "classic"
         if ctx.interaction:
             await set_contextual_locales_from_guild(self.bot, ctx.guild)

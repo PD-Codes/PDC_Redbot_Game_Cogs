@@ -386,6 +386,7 @@ class CompareChars(commands.Cog):
         locale: str = "en",
         private: bool = True,
     ):
+        """Compare two World of Warcraft characters."""
         game = "classic"
         if ctx.interaction:
             await set_contextual_locales_from_guild(self.bot, ctx.guild)

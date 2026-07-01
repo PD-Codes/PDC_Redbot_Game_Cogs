@@ -6,7 +6,7 @@
         "Domekologe"
     ],
     "description": "Warcraft Logs — Retail. Check Warcraft Logs for data on players of Retail World of Warcraft (Retail-only; Classic is a separate cog). Fork of aikaterna's original WarcraftLogs cog.",
-    "install_msg": "Check out [p]help WarcraftLogsRetail and set your WCL API key, available by signing into a WarcraftLogs account on their site and visiting the bottom of your settings page.\nThe bot needs Embed Links permissions before the relevant commands will be available for use in this cog.\nThis cog also comes with a font that is included in the bundled data, under the Apache 2.0 License, which can also be found in that bundled data directory.",
+    "install_msg": "Check out [p]help WarcraftLogsRetail and set your WCL API key, available by signing into a WarcraftLogs account on their site and visiting the bottom of your settings page.\nThe bot needs Embed Links permissions before the relevant commands will be available for use in this cog.\nThis cog also comes with a font that is included in the bundled data, under the Apache 2.0 License, which can also be found in that bundled data directory.\n\nThis cog queries an outside service (Warcraft Logs API) and needs Warcraft Logs API credentials.",
     "short": "Warcraft Logs — Retail: data for Retail World of Warcraft players.",
     "tags": [
         "warcraft"

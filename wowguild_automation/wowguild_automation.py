@@ -1888,6 +1888,7 @@ class WowGuildAutomation(commands.Cog):
         ]
     )
     async def slash_wow_user(self, interaction: discord.Interaction, action: str) -> None:
+        """User commands for WoW guild onboarding and verification."""
         if not isinstance(interaction.user, discord.Member) or interaction.guild is None:
             await interaction.response.send_message(
                 tr_lang("en-US", "Nur auf einem Server.", "Only on a server."), ephemeral=True
@@ -1953,6 +1954,7 @@ class WowGuildAutomation(commands.Cog):
         ]
     )
     async def slash_wow_admin(self, interaction: discord.Interaction, action: str) -> None:
+        """Admin commands for WoW guild automation."""
         if not isinstance(interaction.user, discord.Member) or interaction.guild is None:
             await interaction.response.send_message(
                 tr_lang("en-US", "Nur auf einem Server.", "Only on a server."), ephemeral=True
@@ -2068,6 +2070,7 @@ class WowGuildAutomation(commands.Cog):
         ]
     )
     async def slash_wow_masteradmin(self, interaction: discord.Interaction, action: str) -> None:
+        """Master-admin setup commands for WoW guild automation."""
         if not isinstance(interaction.user, discord.Member) or interaction.guild is None:
             await interaction.response.send_message(
                 tr_lang("en-US", "Nur auf einem Server.", "Only on a server."), ephemeral=True

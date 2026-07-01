@@ -6,7 +6,7 @@
     ],
     "description": "CLASSIC version of WoWTools. Cog for interacting with World of Warcraft Classic (MoP Classic) APIs. Loads alongside the retail WoWTools cog; all commands are prefixed with wowtc-.",
     "short": "CLASSIC version of WoWTools for World of Warcraft Classic.",
-    "install_msg": "Make sure you check out `[p]help wowset` after loading this cog and set all your settings as most of the commands won't work otherwise.",
+    "install_msg": "Make sure you check out `[p]help wowset` after loading this cog and set all your settings as most of the commands won't work otherwise.\n\nThis cog queries outside services (Blizzard API and Raider.IO) and needs Blizzard API credentials.",
     "tags": [
         "warcraft",
         "world of warcraft"

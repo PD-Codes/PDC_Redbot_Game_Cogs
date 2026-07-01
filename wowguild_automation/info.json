@@ -16,6 +16,6 @@
     "hidden": false,
     "min_bot_version": "3.5.0",
     "end_user_data_statement": "Stores per-guild WoW/API and Discord role settings; per-member linked character names, mains, onboarding language, registrations, and ready-times. Bot-owner global config holds Blizzard API client id/secret. Member data is cleared when a user leaves the guild or when admins remove it.",
-    "install_msg": "WoW Guild Automation loaded. Configure roles, channels and onboarding via the web dashboard.",
+    "install_msg": "WoW Guild Automation loaded. Configure roles, channels and onboarding via the web dashboard.\n\nThis cog interacts with outside services (Discord OAuth2 and the Blizzard/Battle.net API) for member verification.",
     "disabled": false
 }
