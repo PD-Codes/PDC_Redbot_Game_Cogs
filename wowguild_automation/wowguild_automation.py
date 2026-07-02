@@ -297,6 +297,20 @@ class WowGuildAutomation(commands.Cog):
                 pass
         self._dashboard_attached = False
 
+    async def red_delete_data_for_user(self, *, requester: str, user_id: int) -> None:
+        """Delete all stored member data (characters, registrations, etc.) for the user."""
+        for guild_id in (await self.config.all_members()).keys():
+            await self.config.member_from_ids(guild_id, user_id).clear()
+
+    async def red_get_data_for_user(self, *, user_id: int) -> dict:
+        """Return all stored member data for the user (per guild)."""
+        data = {}
+        all_members = await self.config.all_members()
+        for guild_id, members in all_members.items():
+            if user_id in members:
+                data[str(guild_id)] = members[user_id]
+        return data
+
     @commands.Cog.listener()
     async def on_cog_add(self, cog: commands.Cog) -> None:
         if self._dashboard_attached:
@@ -2077,7 +2091,18 @@ class WowGuildAutomation(commands.Cog):
             )
             return
         lang = await self._guild_lang(interaction.guild, interaction.user)
-        if not interaction.user.guild_permissions.manage_guild:
+        # Tiering: master/global actions (Blizzard API credentials, global bot
+        # defaults) are strictly bot-owner only; everything else requires the
+        # admin tier (Manage Server). The bot owner may always proceed.
+        is_bot_owner = await self.bot.is_owner(interaction.user)
+        if action in ("botsetup", "mastersetup_bot"):
+            if not is_bot_owner:
+                await interaction.response.send_message(
+                    tr_lang(lang, "Nur der **Bot-Besitzer** kann das.", "Only the **bot owner** can do this."),
+                    ephemeral=True,
+                )
+                return
+        elif not (is_bot_owner or interaction.user.guild_permissions.manage_guild):
             await interaction.response.send_message(
                 tr_lang(
                     lang,
@@ -2088,13 +2113,6 @@ class WowGuildAutomation(commands.Cog):
             )
             return
         guild = interaction.guild
-        if action in ("botsetup", "mastersetup_bot"):
-            if interaction.user.id not in self.bot.owner_ids:
-                await interaction.response.send_message(
-                    tr_lang(lang, "Nur der **Bot-Besitzer** kann das.", "Only the **bot owner** can do this."),
-                    ephemeral=True,
-                )
-                return
         if action == "onboarding_setup":
             await interaction.response.send_modal(OnboardingSetupModal(self, guild, lang))
             return

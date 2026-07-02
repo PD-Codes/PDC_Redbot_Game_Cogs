@@ -465,6 +465,7 @@ class WoWTools(
                 log.debug("Exception in countdown channel editing. {}".format(e))
 
     @wowset.command(name="status", hidden=True)
+    @commands.is_owner()
     async def wowset_status(
         self,
         ctx: commands.Context,

@@ -780,7 +780,7 @@ class WarcraftLogsClassic(commands.Cog):
         }},
     )
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_channels=True)
+    @commands.admin_or_permissions(manage_guild=True)
     @app_commands.describe(channel="The channel where WCL updates will be sent")
     async def wclset_channel(self, ctx, channel: discord.TextChannel):
         """Set the channel where WCL updates will be sent."""
@@ -810,7 +810,10 @@ class WarcraftLogsClassic(commands.Cog):
         notification_channel: discord.TextChannel = ctx.guild.get_channel(
             guildinfo["notification_channel"]
         )
-        msg += _("Notification channel: {channel}\n").format(channel=notification_channel.name)
+        # Guard against an unset or deleted notification channel.
+        msg += _("Notification channel: {channel}\n").format(
+            channel=notification_channel.name if notification_channel else "None"
+        )
         msg += "\n"
 
         msg += _("[Settings for {user}]\n").format(user=user.display_name)

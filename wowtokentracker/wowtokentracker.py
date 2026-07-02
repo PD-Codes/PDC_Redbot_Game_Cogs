@@ -68,6 +68,10 @@ class WoWTokenTracker(commands.Cog):
         if self._task:
             self._task.cancel()
 
+    async def red_delete_data_for_user(self, *, requester: str, user_id: int) -> None:
+        """This cog does not store personal data about Discord users."""
+        return
+
     @staticmethod
     def _t(lang: str, de: str, en: str) -> str:
         return de if str(lang).lower().startswith("de") else en

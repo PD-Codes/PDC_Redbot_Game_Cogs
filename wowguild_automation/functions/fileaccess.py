@@ -40,7 +40,7 @@ class ConfigStore:
         key = str(guild_id)
         if key not in data["guilds"]:
             data["guilds"][key] = {
-                "language": "de-DE",
+                "language": "en-US",
                 "features": {
                     "onboarding": True,
                     "auto_verify": True,

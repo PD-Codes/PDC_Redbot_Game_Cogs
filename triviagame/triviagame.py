@@ -61,6 +61,20 @@ class TriviaGame(commands.Cog):
             sess["event"].set()
         self._active.clear()
 
+    async def red_delete_data_for_user(self, *, requester: str, user_id: int) -> None:
+        """Delete stored points for the given user in all guilds."""
+        for guild_id in (await self.config.all_members()).keys():
+            await self.config.member_from_ids(guild_id, user_id).clear()
+
+    async def red_get_data_for_user(self, *, user_id: int) -> dict:
+        """Return stored points for the given user (per guild)."""
+        data = {}
+        all_members = await self.config.all_members()
+        for guild_id, members in all_members.items():
+            if user_id in members:
+                data[str(guild_id)] = members[user_id]
+        return data
+
     @staticmethod
     def _t(lang: str, de: str, en: str) -> str:
         return de if str(lang).lower().startswith("de") else en

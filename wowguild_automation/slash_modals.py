@@ -91,7 +91,8 @@ class BotSetupModal(discord.ui.Modal, title="Blizzard API (Bot-Besitzer)"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         glang = await self.cog._guild_lang(interaction.guild) if interaction.guild else "en-US"
-        if interaction.user.id not in self.cog.bot.owner_ids:
+        # Re-check on submit: API credentials are strictly bot-owner only.
+        if not await self.cog.bot.is_owner(interaction.user):
             await interaction.response.send_message(
                 tr_lang(glang, "Nur Bot-Besitzer.", "Bot owner only."), ephemeral=True
             )
@@ -134,7 +135,8 @@ class MasterSetupModal(discord.ui.Modal, title="Globale Defaults"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         glang = await self.cog._guild_lang(interaction.guild) if interaction.guild else "en-US"
-        if interaction.user.id not in self.cog.bot.owner_ids:
+        # Re-check on submit: global bot defaults are strictly bot-owner only.
+        if not await self.cog.bot.is_owner(interaction.user):
             await interaction.response.send_message(
                 tr_lang(glang, "Nur Bot-Besitzer.", "Bot owner only."), ephemeral=True
             )

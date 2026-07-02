@@ -191,6 +191,7 @@ class GuildManage:
         }},
     )
     @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
     @app_commands.describe(channel="The channel where guild logs will be sent")
     async def guildlog(self, ctx: commands.Context, channel: discord.TextChannel | discord.Thread):
         """Set the channel for guild logs.
@@ -221,6 +222,7 @@ class GuildManage:
         }},
     )
     @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
     @app_commands.describe(channel="The channel where welcome messages will be sent")
     async def guildlog_welcome(
         self, ctx: commands.Context, channel: discord.TextChannel | discord.Thread

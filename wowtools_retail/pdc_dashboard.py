@@ -50,13 +50,17 @@ except Exception:  # pdc_webdashboard not installed
     DASHBOARD_AVAILABLE = False
 
     def L(de, en=None):
-        return de
+        # Fallback without the dashboard: default to English (en-US).
+        return en if en is not None else de
 
     def tr(ctx, de, en):
-        return de
+        # Fallback without the dashboard: default to English (en-US).
+        return en
 
     def tr_lang(lang, de, en):
-        return de
+        # Fallback without the dashboard: honour an explicit German choice,
+        # otherwise default to English (en-US).
+        return de if str(lang or "").lower().startswith("de") else en
 
     def _noop_decorator(*_args, **_kwargs):
         def deco(func):
@@ -117,7 +121,7 @@ def register_dashboard(cog) -> bool:
 
 
 def unregister_dashboard(cog) -> None:
-    """In ``cog_unload`` aufrufen (immer sicher)."""
+    """Call in ``cog_unload`` (always safe)."""
     dashboard = cog.bot.get_cog("pdc_webdashboard") or cog.bot.get_cog("WebDashboard")
     if dashboard is not None:
         try:

@@ -84,13 +84,17 @@ except Exception:  # pdc_webdashboard not installed
     DashboardContext = object  # type: ignore
 
     def L(de, en=None):
-        return de
+        # Fallback without the dashboard: default to English (en-US).
+        return en if en is not None else de
 
     def tr(ctx, de, en):
-        return de
+        # Fallback without the dashboard: default to English (en-US).
+        return en
 
     def tr_lang(lang, de, en):
-        return de
+        # Fallback without the dashboard: honour an explicit German choice,
+        # otherwise default to English (en-US).
+        return de if str(lang or "").lower().startswith("de") else en
 
 
 def register_dashboard(cog) -> bool:
