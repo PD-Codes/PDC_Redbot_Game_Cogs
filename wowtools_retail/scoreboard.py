@@ -310,109 +310,128 @@ class Scoreboard:
     @tasks.loop(minutes=5)
     async def update_dungeon_scoreboard(self):
         for guild in self.bot.guilds:
-            if await self.bot.cog_disabled_in_guild(self, guild):
-                continue
-            await set_contextual_locales_from_guild(self.bot, guild)
-
-            sb_channel_id: int = await self.config.guild(guild).scoreboard_channel()
-            sb_msg_id: int = await self.config.guild(guild).scoreboard_message()
-            if not (sb_channel_id and sb_msg_id):
-                continue
-            sb_channel: discord.TextChannel = guild.get_channel(sb_channel_id)
-
+            # Any per-guild failure must not kill the whole task loop.
             try:
-                sb_msg: discord.Message = await sb_channel.fetch_message(sb_msg_id)
-            except discord.HTTPException:
-                log.error(
-                    f"Failed to fetch scoreboard message in guild {guild.id} ({guild.name}).",
-                    exc_info=True,
-                )
-                continue
-            if not sb_msg:
-                continue
-
-            max_chars = 20
-            headers = ["#", _("Name"), _("Score")]
-            region: str = await self.config.guild(guild).region()
-            realm: str = await self.config.guild(guild).realm()
-            guild_name: str = await self.config.guild(guild).real_guild_name()
-            sb_blacklist: List[str] = await self.config.guild(guild).scoreboard_blacklist()
-            if not region or not realm or not guild_name:
-                continue
-            image: bool = await self.config.guild(guild).sb_image()
-
-            embed = discord.Embed(
-                title=_("Mythic+ Guild Scoreboard"),
-                color=await self.bot.get_embed_color(sb_msg),
-            )
-            embed.set_author(name=guild.name, icon_url=guild.icon.url)
-            try:
-                tabulate_list = await self._get_dungeon_scores(
-                    guild_name,
-                    max_chars,
-                    realm,
-                    region,
-                    sb_blacklist,
-                    image=image,
-                )
-            except ValueError as e:
-                log.error(f"Error getting dungeon scores for {guild.id}, skipping. Response: {e}")
-                continue
-
-            # TODO: When dpy2 is out, use discord.utils.format_dt()
-            desc = _("Last updated <t:{timestamp}:R>\n").format(
-                timestamp=int(datetime.now(timezone.utc).timestamp())
-            )
-            if cutoff := await self.get_season_title_cutoff(region):
-                desc += _("Score cutoff for season title: `{cutoff}`\n").format(cutoff=cutoff)
-
-            if image:
-                img_file = await self._generate_scoreboard_image(
-                    tabulate_list, dev_guild=guild.id in DEV_GUILDS
-                )
-                embed.set_image(url=f"attachment://{img_file.filename}")
-                embed.set_footer(text=_("Updates every 5 minutes"))
-            else:
-                formatted_rankings = box(
-                    tabulate(
-                        tabulate_list,
-                        headers=headers,
-                        tablefmt="plain",
-                        disable_numparse=True,
-                    ),
-                    lang="md",
-                )
-                desc += formatted_rankings
-
-                # Don't edit if there wouldn't be a change
-                old_rankings = sb_msg.embeds[0].description.splitlines()
-                old_rankings = "\n".join(old_rankings[1:])
-                if old_rankings == formatted_rankings:
+                if await self.bot.cog_disabled_in_guild(self, guild):
                     continue
-                embed.set_footer(text=_("Updates only when there is a ranking change"))
+                await set_contextual_locales_from_guild(self.bot, guild)
 
-            ass_integration = await self.config.assistant_cog_integration()
-            if (assistant := self.bot.get_cog("Assistant")) and ass_integration:
-                await self.add_assistant_embedding(assistant, guild, image, tabulate_list)
+                sb_channel_id: int = await self.config.guild(guild).scoreboard_channel()
+                sb_msg_id: int = await self.config.guild(guild).scoreboard_message()
+                if not (sb_channel_id and sb_msg_id):
+                    continue
+                sb_channel: discord.TextChannel = guild.get_channel(sb_channel_id)
+                if sb_channel is None:
+                    # The configured channel no longer exists; skip this guild.
+                    log.warning(
+                        f"Scoreboard channel {sb_channel_id} not found in guild {guild.id}."
+                    )
+                    continue
 
-            embed.description = desc
+                try:
+                    sb_msg: discord.Message = await sb_channel.fetch_message(sb_msg_id)
+                except discord.HTTPException:
+                    log.error(
+                        f"Failed to fetch scoreboard message in guild {guild.id} ({guild.name}).",
+                        exc_info=True,
+                    )
+                    continue
+                if not sb_msg:
+                    continue
 
-            try:
+                max_chars = 20
+                headers = ["#", _("Name"), _("Score")]
+                region: str = await self.config.guild(guild).region()
+                realm: str = await self.config.guild(guild).realm()
+                guild_name: str = await self.config.guild(guild).real_guild_name()
+                sb_blacklist: List[str] = await self.config.guild(guild).scoreboard_blacklist()
+                if not region or not realm or not guild_name:
+                    continue
+                image: bool = await self.config.guild(guild).sb_image()
+
+                embed = discord.Embed(
+                    title=_("Mythic+ Guild Scoreboard"),
+                    color=await self.bot.get_embed_color(sb_msg),
+                )
+                # guild.icon can be None (no icon set).
+                embed.set_author(
+                    name=guild.name, icon_url=guild.icon.url if guild.icon else None
+                )
+                try:
+                    tabulate_list = await self._get_dungeon_scores(
+                        guild_name,
+                        max_chars,
+                        realm,
+                        region,
+                        sb_blacklist,
+                        image=image,
+                    )
+                except ValueError as e:
+                    log.error(
+                        f"Error getting dungeon scores for {guild.id}, skipping. Response: {e}"
+                    )
+                    continue
+
+                # TODO: When dpy2 is out, use discord.utils.format_dt()
+                desc = _("Last updated <t:{timestamp}:R>\n").format(
+                    timestamp=int(datetime.now(timezone.utc).timestamp())
+                )
+                if cutoff := await self.get_season_title_cutoff(region):
+                    desc += _("Score cutoff for season title: `{cutoff}`\n").format(cutoff=cutoff)
+
                 if image:
-                    await sb_msg.edit(embed=embed, attachments=[img_file])
+                    img_file = await self._generate_scoreboard_image(
+                        tabulate_list, dev_guild=guild.id in DEV_GUILDS
+                    )
+                    embed.set_image(url=f"attachment://{img_file.filename}")
+                    embed.set_footer(text=_("Updates every 5 minutes"))
                 else:
-                    await sb_msg.edit(embed=embed, attachments=[])
-            except discord.Forbidden:
-                log.error(
-                    f"Failed to edit scoreboard message in guild {guild.id} ({guild.name}) "
-                    f"due to missing permissions.",
-                    exc_info=True,
-                )
-            except discord.HTTPException:
-                log.error(
-                    f"Failed to edit scoreboard message in guild {guild.id} ({guild.name}).",
-                    exc_info=True,
-                )
+                    formatted_rankings = box(
+                        tabulate(
+                            tabulate_list,
+                            headers=headers,
+                            tablefmt="plain",
+                            disable_numparse=True,
+                        ),
+                        lang="md",
+                    )
+                    desc += formatted_rankings
+
+                    # Don't edit if there wouldn't be a change.
+                    # The message may have no embeds (e.g. stripped by another bot),
+                    # in that case simply rebuild it below.
+                    if sb_msg.embeds and sb_msg.embeds[0].description:
+                        old_rankings = sb_msg.embeds[0].description.splitlines()
+                        old_rankings = "\n".join(old_rankings[1:])
+                        if old_rankings == formatted_rankings:
+                            continue
+                    embed.set_footer(text=_("Updates only when there is a ranking change"))
+
+                ass_integration = await self.config.assistant_cog_integration()
+                if (assistant := self.bot.get_cog("Assistant")) and ass_integration:
+                    await self.add_assistant_embedding(assistant, guild, image, tabulate_list)
+
+                embed.description = desc
+
+                try:
+                    if image:
+                        await sb_msg.edit(embed=embed, attachments=[img_file])
+                    else:
+                        await sb_msg.edit(embed=embed, attachments=[])
+                except discord.Forbidden:
+                    log.error(
+                        f"Failed to edit scoreboard message in guild {guild.id} ({guild.name}) "
+                        f"due to missing permissions.",
+                        exc_info=True,
+                    )
+                except discord.HTTPException:
+                    log.error(
+                        f"Failed to edit scoreboard message in guild {guild.id} ({guild.name}).",
+                        exc_info=True,
+                    )
+            except Exception as e:
+                log.exception("Scoreboard update failed for guild %s: %s", guild.id, e)
+                continue
 
     @staticmethod
     async def add_assistant_embedding(assistant, guild, image, tabulate_list):

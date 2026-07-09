@@ -280,7 +280,7 @@ class WoWTokenTracker(commands.Cog):
         d7 = _ago(168)
         if d1 is not None:
             diff = current - d1
-            e.add_field(name="24h", value=f"{'+' if diff >= 0 else ''}{self._gold(abs(diff)) if diff < 0 else self._gold(diff)}", inline=True)
+            e.add_field(name="24h", value=f"{'+' if diff >= 0 else ''}{self._gold(diff) if diff >= 0 else '-' + self._gold(abs(diff))}", inline=True)
         if d7 is not None:
             diff = current - d7
             e.add_field(name="7d", value=f"{'+' if diff >= 0 else ''}{self._gold(diff) if diff >= 0 else '-' + self._gold(abs(diff))}", inline=True)

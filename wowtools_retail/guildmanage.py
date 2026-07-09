@@ -250,56 +250,68 @@ class GuildManage:
     @tasks.loop(minutes=5)
     async def guild_log(self):
         for guild in self.bot.guilds:
-            if await self.bot.cog_disabled_in_guild(self, guild):
-                continue
-            await set_contextual_locales_from_guild(self.bot, guild)
-
-            guild_log_channel: int = await self.config.guild(guild).guild_log_channel()
-            if guild_log_channel is None:
-                continue
-            guild_log_channel: discord.TextChannel | discord.Thread = guild.get_channel_or_thread(
-                guild_log_channel
-            )
-            if guild_log_channel is None:
-                continue
-
-            log.debug("Comparing guild rosters.")
+            # Any per-guild failure must not kill the whole task loop.
             try:
-                current_roster = await self.get_guild_roster(guild)
-            except InvalidBlizzardAPI:
-                log.warning(
-                    "The Blizzard API is not properly set up.\n"
-                    "Create a client on https://develop.battle.net/ and then type in "
-                    "`{prefix}set api blizzard client_id,whoops client_secret,whoops` "
-                    "filling in `whoops` with your client's ID and secret."
+                if await self.bot.cog_disabled_in_guild(self, guild):
+                    continue
+                await set_contextual_locales_from_guild(self.bot, guild)
+
+                guild_log_channel: int = await self.config.guild(guild).guild_log_channel()
+                if guild_log_channel is None:
+                    continue
+                guild_log_channel: discord.TextChannel | discord.Thread = (
+                    guild.get_channel_or_thread(guild_log_channel)
                 )
-                return
-            except RuntimeError:
-                # idk, try again later
-                return
-            previous_roster: dict[str, int] = await self.config.guild(guild).guild_roster()
+                if guild_log_channel is None:
+                    continue
 
-            # Have to do this now because the key will include the realm name, meaning comparing
-            # means everything in previous will be different and it will send a message for
-            # every single roster member.
-            prev_for_diff: dict[str, int] = {}
-            for name, rank in previous_roster.items():
-                # Converting `character:realm` to just `character`
-                prev_for_diff[name.split(":")[0]] = rank
-            current_for_diff: dict[str, int] = {}
-            for name, rank in current_roster.items():
-                current_for_diff[name.split(":")[0]] = rank
+                # Skip guilds without a configured WoW guild name/realm,
+                # otherwise get_guild_roster() would crash on None.lower().
+                if not await self.config.guild(guild).gmanage_guild():
+                    continue
+                if not await self.config.guild(guild).gmanage_realm():
+                    continue
 
-            difference = list(dictdiffer.diff(prev_for_diff, current_for_diff))
-            if not difference:
-                log.debug("No difference in guild roster.")
+                log.debug("Comparing guild rosters.")
+                try:
+                    current_roster = await self.get_guild_roster(guild)
+                except InvalidBlizzardAPI:
+                    log.warning(
+                        "The Blizzard API is not properly set up.\n"
+                        "Create a client on https://develop.battle.net/ and then type in "
+                        "`{prefix}set api blizzard client_id,whoops client_secret,whoops` "
+                        "filling in `whoops` with your client's ID and secret."
+                    )
+                    continue
+                except RuntimeError:
+                    # idk, try again later
+                    continue
+                previous_roster: dict[str, int] = await self.config.guild(guild).guild_roster()
+
+                # Have to do this now because the key will include the realm name, meaning comparing
+                # means everything in previous will be different and it will send a message for
+                # every single roster member.
+                prev_for_diff: dict[str, int] = {}
+                for name, rank in previous_roster.items():
+                    # Converting `character:realm` to just `character`
+                    prev_for_diff[name.split(":")[0]] = rank
+                current_for_diff: dict[str, int] = {}
+                for name, rank in current_roster.items():
+                    current_for_diff[name.split(":")[0]] = rank
+
+                difference = list(dictdiffer.diff(prev_for_diff, current_for_diff))
+                if not difference:
+                    log.debug("No difference in guild roster.")
+                    continue
+
+                embeds = await self.get_event_embeds(difference, guild)
+                await self.config.guild(guild).guild_roster.set(current_roster)
+
+                for i in range((len(embeds) // 10) + 1):
+                    await guild_log_channel.send(embeds=embeds[i * 10 : (i + 1) * 10], silent=True)
+            except Exception as e:
+                log.exception("Guild log update failed for guild %s: %s", guild.id, e)
                 continue
-
-            embeds = await self.get_event_embeds(difference, guild)
-            await self.config.guild(guild).guild_roster.set(current_roster)
-
-            for i in range((len(embeds) // 10) + 1):
-                await guild_log_channel.send(embeds=embeds[i * 10 : (i + 1) * 10], silent=True)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):

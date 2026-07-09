@@ -19,6 +19,16 @@ baseurl = "https://classic.warcraftlogs.com"
 graphql_url = baseurl + "/api/v2/client"
 
 
+def _graphql_errors(json: dict) -> Optional[str]:
+    """Extract GraphQL errors (the WCL API returns them as a list under "errors")."""
+    errors = json.get("errors", None)
+    if not errors:
+        return None
+    return "; ".join(
+        e.get("message", str(e)) if isinstance(e, dict) else str(e) for e in errors
+    )
+
+
 async def generate_bearer(bot: Red, config: Config) -> Optional[str]:
     """Generate the Bearer token used in GraphQL queries
 
@@ -126,6 +136,12 @@ class WoWLogsClient:
             error = json.get("error", None)
             if error:
                 log.error(f"Error: {error}")
+                return json
+
+            gql_errors = _graphql_errors(json)
+            if gql_errors:
+                log.error(f"GraphQL error: {gql_errors}")
+                return {"error": gql_errors}
 
             return json
 
@@ -152,17 +168,26 @@ class WoWLogsClient:
                 log.error(f"Error: {error}")
                 return json
 
-            if json["data"]["characterData"]["character"] is None:
-                return False
+            gql_errors = _graphql_errors(json)
+            if gql_errors:
+                log.error(f"GraphQL error: {gql_errors}")
+                return {"error": gql_errors}
 
-            data = json["data"]["characterData"]["character"]["recentReports"]["data"]
-            unique_encouters = {"ids": [], "latest": 0, "latest_time": 0}
-            for fight in data[0]["fights"]:
-                if fight["encounterID"] not in unique_encouters["ids"]:
-                    unique_encouters["ids"].append(int(fight["encounterID"]))
-                if fight["endTime"] > unique_encouters["latest_time"]:
-                    unique_encouters["latest"] = fight["encounterID"]
-                    unique_encouters["latest_time"] = fight["endTime"]
+            try:
+                if json["data"]["characterData"]["character"] is None:
+                    return False
+
+                data = json["data"]["characterData"]["character"]["recentReports"]["data"]
+                unique_encouters = {"ids": [], "latest": 0, "latest_time": 0}
+                for fight in data[0]["fights"]:
+                    if fight["encounterID"] not in unique_encouters["ids"]:
+                        unique_encouters["ids"].append(int(fight["encounterID"]))
+                    if fight["endTime"] > unique_encouters["latest_time"]:
+                        unique_encouters["latest"] = fight["encounterID"]
+                        unique_encouters["latest_time"] = fight["endTime"]
+            except (KeyError, TypeError, IndexError):
+                log.error("Unexpected response structure from the WCL API")
+                return None
             return unique_encouters
 
     async def get_gear(self, char_name: str, char_realm: str, char_server: str, encounter_id: int):
@@ -189,8 +214,17 @@ class WoWLogsClient:
                 log.error(f"Error: {error}")
                 return json
 
-            if json["data"]["characterData"]["character"] is None:
-                return False
+            gql_errors = _graphql_errors(json)
+            if gql_errors:
+                log.error(f"GraphQL error: {gql_errors}")
+                return {"error": gql_errors}
 
-            data = json["data"]["characterData"]["character"]
+            try:
+                if json["data"]["characterData"]["character"] is None:
+                    return False
+
+                data = json["data"]["characterData"]["character"]
+            except (KeyError, TypeError):
+                log.error("Unexpected response structure from the WCL API")
+                return None
             return data

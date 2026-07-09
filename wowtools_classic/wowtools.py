@@ -1,4 +1,5 @@
 import datetime
+import html
 import logging
 from typing import Any, Dict, Literal, Mapping, Optional
 
@@ -213,6 +214,7 @@ class WoWToolsClassic(
                         ),
                         ephemeral=True,
                     )
+                    return
                 await self.config.guild(ctx.guild).region.set(region)
             await ctx.send(_("Region set succesfully."), ephemeral=True)
         except Exception as e:
@@ -443,9 +445,14 @@ class WoWToolsClassic(
                 diff = release_time - now
                 early_access = False
             if diff.total_seconds() < 0:
-                await countdown_channel.delete()
+                try:
+                    await countdown_channel.delete()
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    log.warning(
+                        "Failed to delete countdown channel in guild %s: %s", guild.id, e
+                    )
                 await self.config.guild(guild).countdown_channel.clear()
-                return
+                continue
 
             days = diff.days
             hours, remainder = divmod(diff.seconds, 3600)
@@ -465,6 +472,12 @@ class WoWToolsClassic(
             except Exception as e:
                 # Probably rate limit stuff. Just ignore.
                 log.debug("Exception in countdown channel editing. {}".format(e))
+
+    @update_countdown_channels.error
+    async def update_countdown_channels_error(self, error: BaseException) -> None:
+        # Log the exception and restart the loop so it doesn't die permanently.
+        log.exception("Unhandled exception in update_countdown_channels task.", exc_info=error)
+        self.update_countdown_channels.restart()
 
     @wowset.command(name="status", hidden=True)
     @commands.is_owner()
@@ -512,8 +525,17 @@ class WoWToolsClassic(
 
     @tasks.loop(minutes=60)
     async def update_bot_status(self):
-        if not await self.set_bot_status():
-            log.debug("Setting the bot's status failed.")
+        try:
+            if not await self.set_bot_status():
+                log.debug("Setting the bot's status failed.")
+        except Exception as e:
+            log.warning("Failed to update the bot's status: %s", e)
+
+    @update_bot_status.error
+    async def update_bot_status_error(self, error: BaseException) -> None:
+        # Log the exception and restart the loop so it doesn't die permanently.
+        log.exception("Unhandled exception in update_bot_status task.", exc_info=error)
+        self.update_bot_status.restart()
 
     @commands.Cog.listener()
     async def on_red_api_tokens_update(self, service_name: str, api_tokens: Mapping[str, str]):
@@ -773,6 +795,14 @@ class WoWToolsClassic(
                 "redirect_url": kwargs.get("request_url"),
             }
 
+        # Escape ALL user-controlled values before interpolating them into the
+        # HTML below (attributes and element content) to prevent stored XSS.
+        region_esc = html.escape(str(region or ""), quote=True)
+        realm_esc = html.escape(str(realm or ""), quote=True)
+        gname_esc = html.escape(str(gname or ""), quote=True)
+        welcome_note_esc = html.escape(str(texts.get("welcome_note", "")), quote=True)
+        status_note_esc = html.escape(str(texts.get("status_note", "")), quote=True)
+
         source = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
@@ -795,15 +825,15 @@ class WoWToolsClassic(
 <p><b>Variables:</b> <code>{{guild_name}}</code> <code>{{region}}</code> <code>{{realm}}</code></p>
 <form method='post'>
 <label>Region</label><select name='region'>
-<option value='eu' {'selected' if (region or 'eu') == 'eu' else ''}>eu</option>
-<option value='us' {'selected' if region == 'us' else ''}>us</option>
-<option value='kr' {'selected' if region == 'kr' else ''}>kr</option>
+<option value='eu' {'selected' if (region_esc or 'eu') == 'eu' else ''}>eu</option>
+<option value='us' {'selected' if region_esc == 'us' else ''}>us</option>
+<option value='kr' {'selected' if region_esc == 'kr' else ''}>kr</option>
 </select><br><br>
-<label>Realm</label><input name='realm' value='{(realm or '').replace("'", "&#39;")}'><br><br>
-<label>Guild Name</label><input name='guild_name' value='{(gname or '').replace("'", "&#39;")}'><br><br>
+<label>Realm</label><input name='realm' value='{realm_esc}'><br><br>
+<label>Guild Name</label><input name='guild_name' value='{gname_esc}'><br><br>
 <label><input type='checkbox' name='on_message' {'checked' if on_message else ''}> Enable on_message feature</label><br><br>
-<label>Welcome note template</label><textarea rows='2' name='welcome_note'>{texts.get('welcome_note','')}</textarea><br><br>
-<label>Status note template</label><textarea rows='2' name='status_note'>{texts.get('status_note','')}</textarea><br><br>
+<label>Welcome note template</label><textarea rows='2' name='welcome_note'>{welcome_note_esc}</textarea><br><br>
+<label>Status note template</label><textarea rows='2' name='status_note'>{status_note_esc}</textarea><br><br>
 <button type='submit'>Save</button>
 </form>
 </div>

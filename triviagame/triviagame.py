@@ -58,6 +58,7 @@ class TriviaGame(commands.Cog):
     def cog_unload(self) -> None:
         unregister_dashboard(self)
         for sess in self._active.values():
+            sess["stopped"] = True
             sess["event"].set()
         self._active.clear()
 
@@ -117,62 +118,84 @@ class TriviaGame(commands.Cog):
         if ctx.channel.id in self._active:
             await ctx.send(self._t(lang, "Hier läuft schon ein Quiz.", "A quiz is already running here."))
             return
-        pool = await self.config.guild(ctx.guild).questions()
-        if not pool:
-            await ctx.send(self._t(lang, "Keine Fragen hinterlegt.", "No questions configured."))
-            return
-        rounds = max(1, min(20, rounds, len(pool)))
-        questions = random.sample(pool, rounds)
-        await ctx.send(self._t(lang, f"🧠 Quiz startet — {rounds} Fragen! Antworte einfach im Chat.",
-                               f"🧠 Quiz starting — {rounds} questions! Just answer in chat."))
-        round_scores: Dict[int, int] = {}
-        for i, q in enumerate(questions, start=1):
-            answers = {str(q.get("a", "")).strip().lower()}
-            answers |= {str(x).strip().lower() for x in (q.get("alts") or [])}
-            answers.discard("")
-            ev = asyncio.Event()
-            self._active[ctx.channel.id] = {"answers": answers, "winner": None, "event": ev}
-            await ctx.send(embed=discord.Embed(
-                title=self._t(lang, f"Frage {i}/{rounds}", f"Question {i}/{rounds}"),
-                description=str(q.get("q", "")),
-                colour=discord.Colour.blurple(),
-            ))
-            try:
-                await asyncio.wait_for(ev.wait(), timeout=ANSWER_TIME)
-            except asyncio.TimeoutError:
-                pass
-            sess = self._active.pop(ctx.channel.id, None)
-            winner = sess.get("winner") if sess else None
-            if winner is not None:
-                round_scores[winner.id] = round_scores.get(winner.id, 0) + 1
-                await self.config.member(winner).points.set((await self.config.member(winner).points()) + 1)
-                await ctx.send(self._t(lang, f"✅ {winner.mention} richtig! Antwort: **{q.get('a')}**",
-                                       f"✅ {winner.mention} got it! Answer: **{q.get('a')}**"))
+        # Claim the channel immediately (before the first await) so two
+        # parallel starts cannot both pass the check above.
+        sess = {"answers": set(), "winner": None, "event": asyncio.Event(), "stopped": False}
+        self._active[ctx.channel.id] = sess
+        try:
+            pool = await self.config.guild(ctx.guild).questions()
+            if not pool:
+                await ctx.send(self._t(lang, "Keine Fragen hinterlegt.", "No questions configured."))
+                return
+            rounds = max(1, min(20, rounds, len(pool)))
+            questions = random.sample(pool, rounds)
+            await ctx.send(self._t(lang, f"🧠 Quiz startet — {rounds} Fragen! Antworte einfach im Chat.",
+                                   f"🧠 Quiz starting — {rounds} questions! Just answer in chat."))
+            round_scores: Dict[int, int] = {}
+            stopped = False
+            for i, q in enumerate(questions, start=1):
+                answers = {str(q.get("a", "")).strip().lower()}
+                answers |= {str(x).strip().lower() for x in (q.get("alts") or [])}
+                answers.discard("")
+                sess["answers"] = answers
+                sess["winner"] = None
+                sess["event"] = asyncio.Event()
+                await ctx.send(embed=discord.Embed(
+                    title=self._t(lang, f"Frage {i}/{rounds}", f"Question {i}/{rounds}"),
+                    description=str(q.get("q", "")),
+                    colour=discord.Colour.blurple(),
+                ))
+                try:
+                    await asyncio.wait_for(sess["event"].wait(), timeout=ANSWER_TIME)
+                except asyncio.TimeoutError:
+                    pass
+                # Check the stop flag after each question cycle.
+                if sess.get("stopped"):
+                    stopped = True
+                    await ctx.send(self._t(lang, "🛑 Quiz abgebrochen.", "🛑 Quiz stopped."))
+                    break
+                winner = sess.get("winner")
+                if winner is not None:
+                    round_scores[winner.id] = round_scores.get(winner.id, 0) + 1
+                    await self.config.member(winner).points.set((await self.config.member(winner).points()) + 1)
+                    await ctx.send(self._t(lang, f"✅ {winner.mention} richtig! Antwort: **{q.get('a')}**",
+                                           f"✅ {winner.mention} got it! Answer: **{q.get('a')}**"))
+                else:
+                    await ctx.send(self._t(lang, f"⏰ Zeit um! Antwort: **{q.get('a')}**", f"⏰ Time! Answer: **{q.get('a')}**"))
+                await asyncio.sleep(2)
+                if sess.get("stopped"):
+                    stopped = True
+                    await ctx.send(self._t(lang, "🛑 Quiz abgebrochen.", "🛑 Quiz stopped."))
+                    break
+            # Summary
+            if stopped:
+                return
+            if round_scores:
+                ranking = sorted(round_scores.items(), key=lambda kv: kv[1], reverse=True)
+                lines = []
+                for mid, pts in ranking:
+                    m = ctx.guild.get_member(mid)
+                    lines.append(f"**{m.display_name if m else mid}** — {pts}")
+                await ctx.send(embed=discord.Embed(
+                    title=self._t(lang, "🏆 Ergebnis", "🏆 Results"),
+                    description="\n".join(lines),
+                    colour=discord.Colour.gold(),
+                ))
             else:
-                await ctx.send(self._t(lang, f"⏰ Zeit um! Antwort: **{q.get('a')}**", f"⏰ Time! Answer: **{q.get('a')}**"))
-            await asyncio.sleep(2)
-        # Summary
-        if round_scores:
-            ranking = sorted(round_scores.items(), key=lambda kv: kv[1], reverse=True)
-            lines = []
-            for mid, pts in ranking:
-                m = ctx.guild.get_member(mid)
-                lines.append(f"**{m.display_name if m else mid}** — {pts}")
-            await ctx.send(embed=discord.Embed(
-                title=self._t(lang, "🏆 Ergebnis", "🏆 Results"),
-                description="\n".join(lines),
-                colour=discord.Colour.gold(),
-            ))
-        else:
-            await ctx.send(self._t(lang, "Keine richtigen Antworten. 😴", "No correct answers. 😴"))
+                await ctx.send(self._t(lang, "Keine richtigen Antworten. 😴", "No correct answers. 😴"))
+        finally:
+            # Always release the channel, even if the quiz errored out.
+            self._active.pop(ctx.channel.id, None)
 
     @quiz.command(name="stop")
     @commands.admin_or_permissions(manage_messages=True)
     async def quiz_stop(self, ctx: commands.Context) -> None:
         """Stop the running quiz in this channel."""
         lang = await self._lang(ctx.guild)
-        sess = self._active.pop(ctx.channel.id, None)
+        sess = self._active.get(ctx.channel.id)
         if sess:
+            # Signal the running quiz loop to stop; it cleans itself up.
+            sess["stopped"] = True
             sess["event"].set()
             await ctx.send(self._t(lang, "Quiz gestoppt.", "Quiz stopped."))
         else:

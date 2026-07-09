@@ -77,24 +77,32 @@ class Raiderio:
         except KeyError:
             await ctx.send(_("Character not found."))
             return
-        char_race = profile_data["race"]
-        char_spec = profile_data["active_spec_name"]
-        char_class = profile_data["class"]
-        char_guild = profile_data["guild"]["name"]
-        char_image = profile_data["thumbnail_url"]
-        char_score = profile_data["mythic_plus_scores_by_season"][0]["segments"]["all"]
-        char_score_color = int("0x" + char_score["color"][1:], 0)
-        char_raid = profile_data["raid_progression"][self.current_raid]["summary"]
-        char_last_updated = self.parse_date(profile_data["last_crawled_at"])
-        char_gear = profile_data["gear"]
-        char_ilvl = char_gear["item_level_equipped"]
-        char_url = profile_data["profile_url"]
-        char_talents = profile_data["talentLoadout"]["loadout_text"]
+        # All of the following fields can be missing or null in the API
+        # response, so fall back to "N/A" instead of crashing.
+        char_race = profile_data.get("race", "N/A")
+        char_spec = profile_data.get("active_spec_name", "N/A")
+        char_class = profile_data.get("class", "N/A")
+        char_guild = (profile_data.get("guild") or {}).get("name")
+        char_image = profile_data.get("thumbnail_url")
+        seasons = profile_data.get("mythic_plus_scores_by_season") or []
+        char_score = ((seasons[0].get("segments") or {}).get("all") if seasons else None) or {}
+        char_score_color = int("0x" + str(char_score.get("color", "#ffffff"))[1:], 0)
+        char_raid = (
+            (profile_data.get("raid_progression") or {}).get(self.current_raid) or {}
+        ).get("summary", "N/A")
+        last_crawled_at = profile_data.get("last_crawled_at")
+        char_last_updated = self.parse_date(last_crawled_at) if last_crawled_at else "N/A"
+        char_gear = profile_data.get("gear") or {}
+        char_ilvl = char_gear.get("item_level_equipped", "N/A")
+        char_url = profile_data.get("profile_url")
+        char_talents = (profile_data.get("talentLoadout") or {}).get("loadout_text") or ""
 
-        banner = profile_data["profile_banner"]
+        banner = profile_data.get("profile_banner")
 
         banner_url = (
             f"https://cdnassets.raider.io/images/profile/masthead_backdrops/v2/{banner}.jpg"
+            if banner
+            else None
         )
         armory_url = f"https://worldofwarcraft.com/en-gb/character/{region}/{realm}/{char_name}"
         wcl_url = f"https://classic.warcraftlogs.com/character/{region}/{realm}/{char_name}"
@@ -103,10 +111,13 @@ class Raiderio:
         )
 
         # First page
+        description = f"{char_race} {char_spec} {char_class}"
+        if char_guild:
+            description += f"\n<{char_guild}>"
         embed = discord.Embed(
             title=char_name,
             url=char_url,
-            description=f"{char_race} {char_spec} {char_class}\n<{char_guild}>",
+            description=description,
             color=char_score_color,
         )
         embed.set_author(
@@ -116,7 +127,7 @@ class Raiderio:
         embed.set_thumbnail(url=char_image)
         embed.add_field(
             name=_("__**Mythic+ Score**__"),
-            value=char_score["score"],
+            value=char_score.get("score", "N/A"),
             inline=False,
         )
         embed.add_field(name=_("Raid progress"), value=char_raid, inline=True)
@@ -132,7 +143,8 @@ class Raiderio:
             ),
             inline=False,
         )
-        embed.set_image(url=banner_url)
+        if banner_url:
+            embed.set_image(url=banner_url)
         embed.set_footer(
             text=_("Last updated: {char_last_updated}").format(char_last_updated=char_last_updated)
         )

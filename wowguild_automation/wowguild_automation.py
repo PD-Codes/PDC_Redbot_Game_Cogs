@@ -1555,16 +1555,14 @@ class WowGuildAutomation(commands.Cog):
         last = float(cfg.get("rank_sync_last_run_epoch") or 0)
         now = time.time()
         if last <= 0:
-            cfg2 = dict(cfg)
-            cfg2["rank_sync_last_run_epoch"] = now
-            await self.config.guild(guild).set(cfg2)
+            # Only write the single field instead of overwriting the whole
+            # guild config (avoids clobbering concurrent config changes).
+            await self.config.guild(guild).rank_sync_last_run_epoch.set(now)
             return
         if (now - last) < mins * 60:
             return
         await self._background_rank_sync_guild_members(guild)
-        cfg3 = await self.config.guild(guild).all()
-        cfg3["rank_sync_last_run_epoch"] = time.time()
-        await self.config.guild(guild).set(cfg3)
+        await self.config.guild(guild).rank_sync_last_run_epoch.set(time.time())
 
     @tasks.loop(minutes=1)
     async def _rank_auto_sync_loop(self) -> None:

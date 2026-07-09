@@ -295,12 +295,14 @@ class WarcraftLogsRetail(commands.Cog):
 
         userdata = await self.config.user(ctx.author).all()
 
-        name = name.title()
-        realm, region = realm.split(sep=":")
-        realm = ("-".join(realm).title() if isinstance(realm, tuple) else realm.title()).replace(
-            " ", "-"
-        )
-        region = region.upper()
+        region = None
+        if realm:
+            try:
+                realm, region = realm.split(sep=":", maxsplit=1)
+            except ValueError:
+                # No ":" in the input: treat it as a bare realm name and
+                # fall back to the user's saved region below.
+                pass
 
         if not name:
             name = userdata["charname"]
@@ -315,10 +317,25 @@ class WarcraftLogsRetail(commands.Cog):
                 return await ctx.send(
                     _("Please specify a realm name with this command."), ephemeral=True
                 )
+        if not region:
+            region = userdata["region"]
+            if not region:
+                return await ctx.send(
+                    _("Please specify a region like `Realm:EU` with this command."),
+                    ephemeral=True,
+                )
+
+        name = name.title()
+        realm = realm.title().replace(" ", "-")
+        region = region.upper()
+
         await ctx.defer()
 
         # Get the user's last raid encounters
         encounters = await self.http.get_last_encounter(name, realm, region)
+
+        if encounters is None:
+            return await ctx.send(_("The bearer token was invalidated for some reason."))
 
         if encounters is False:
             # the user wasn't found on the API.
@@ -328,21 +345,16 @@ class WarcraftLogsRetail(commands.Cog):
         if error:
             return await ctx.send(f"WCL API Error: {error}")
 
-        if encounters is None:
-            return await ctx.send(_("The bearer token was invalidated for some reason."))
-
         char_data = await self.http.get_gear(name, realm, region, encounters["latest"])
         if not char_data:
             return await ctx.send(
                 _("Check your API token and make sure you " "have added it to the bot correctly.")
             )
+        if char_data.get("error"):
+            return await ctx.send(f"WCL API Error: {char_data['error']}")
         gear = None
 
-        if char_data is None:
-            # Assuming bearer has been invalidated.
-            await self._create_client()
-
-        if len(char_data["encounterRankings"]["ranks"]) != 0:
+        if char_data.get("encounterRankings") and len(char_data["encounterRankings"]["ranks"]) != 0:
             # Ensure this is the encounter that has gear listed.
             # IF it's not, we're moving on with the other encounters.
             sorted_by_time = sorted(
@@ -357,6 +369,11 @@ class WarcraftLogsRetail(commands.Cog):
             encounters["ids"].remove(encounters["latest"])
             for encounter in encounters["ids"]:
                 char_data = await self.http.get_gear(name, realm, region, encounter)
+                # Skip encounters with missing or malformed data.
+                if not char_data or not isinstance(char_data, dict):
+                    continue
+                if not char_data.get("encounterRankings"):
+                    continue
                 if len(char_data["encounterRankings"]["ranks"]) != 0:
                     sorted_by_time = sorted(
                         char_data["encounterRankings"]["ranks"],
@@ -438,7 +455,7 @@ class WarcraftLogsRetail(commands.Cog):
             # embed
             embed = discord.Embed()
             title = f"{name.title()} - {realm.title()} ({region.upper()})"
-            guild_name = sorted_by_time[0]["guild"].get("name", None)
+            guild_name = (sorted_by_time[0].get("guild") or {}).get("name", None)
             if guild_name:
                 title += f"\n{guild_name}"
             embed.title = title
@@ -459,7 +476,7 @@ class WarcraftLogsRetail(commands.Cog):
             await ctx.send(embed=embed)
         else:
             title = f"{name.title()} - {realm.title()} ({region.upper()})"
-            guild_name = sorted_by_time[0]["guild"].get("name", None)
+            guild_name = (sorted_by_time[0].get("guild") or {}).get("name", None)
             if guild_name:
                 title += f" - {guild_name}"
             ilvl = _("Average Item Level: {avg_ilevel}\n").format(avg_ilevel=avg_ilevel)
@@ -538,11 +555,14 @@ class WarcraftLogsRetail(commands.Cog):
         # look up any saved info
         userdata = await self.config.user(ctx.author).all()
 
-        realm, region = realm.split(sep=":")
-        realm = ("-".join(realm).title() if isinstance(realm, tuple) else realm.title()).replace(
-            " ", "-"
-        )
-        region = region.upper()
+        region = None
+        if realm:
+            try:
+                realm, region = realm.split(sep=":", maxsplit=1)
+            except ValueError:
+                # No ":" in the input: treat it as a bare realm name and
+                # fall back to the user's saved region below.
+                pass
 
         if not name:
             name = userdata["charname"]
@@ -552,6 +572,13 @@ class WarcraftLogsRetail(commands.Cog):
             realm = userdata["realm"]
         if not realm:
             return await ctx.send(_("Please specify a realm name with this command."))
+        if not region:
+            region = userdata["region"]
+        if not region:
+            return await ctx.send(_("Please specify a region like `Realm:EU` with this command."))
+
+        realm = realm.title().replace(" ", "-")
+        region = region.upper()
 
         await ctx.defer()
 
@@ -589,6 +616,10 @@ class WarcraftLogsRetail(commands.Cog):
             for zone_obj in zones:
                 zone_number = int(zone_obj["id"])
                 data = await self.http.get_overview(name, realm, region, zone_number, difficulty)
+                if data is None:
+                    return await ctx.send(
+                        _("The bearer token was invalidated for some reason.")
+                    )
                 if error := data.get("error", None):
                     return await ctx.send(f"WCL API Error: {error}")
                 if (data is False) or (not data["data"]["characterData"]["character"]):
@@ -600,6 +631,8 @@ class WarcraftLogsRetail(commands.Cog):
         else:
             # try getting a specific zone's worth of info for this character
             data = await self.http.get_overview(name, realm, region, zone_id, difficulty)
+            if data is None:
+                return await ctx.send(_("The bearer token was invalidated for some reason."))
             if error := data.get("error", None):
                 return await ctx.send(f"WCL API Error: {error}")
             if (data is False) or (not data["data"]["characterData"]["character"]):
