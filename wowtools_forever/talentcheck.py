@@ -11,6 +11,7 @@ from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_g
 from .autocomplete import (
     _LANG_CODES as AC_LANG_CODES,
 )
+from .groups import wowtf
 from .forever_api import (
     display_name,
     explain_character_error,
@@ -68,7 +69,7 @@ class TalentCheck(commands.Cog):
     def __init__(self, bot: Red) -> None:
         self.bot = bot
 
-    @commands.hybrid_command(name="wowtf-talentcheck")
+    @wowtf.command(name="talentcheck")
     @app_commands.describe(
         region="Region (eu/us/kr/tw); empty = your saved character region",
         name="Character first name; empty = your saved character",

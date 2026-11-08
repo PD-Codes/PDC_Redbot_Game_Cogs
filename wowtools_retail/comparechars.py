@@ -10,6 +10,7 @@ from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_guild
 
+from .groups import WoWToolsGroups
 from .autocomplete import (
     REGIONS,
     realm_choices,
@@ -355,8 +356,8 @@ class CompareChars(commands.Cog):
     def __init__(self, bot: Red) -> None:
         self.bot = bot
 
-    @commands.hybrid_command(
-        name="wowt-comparechars",
+    @WoWToolsGroups.main_group.command(
+        name="comparechars",
         description="Compare two characters by gear (item level per slot), info or statistics.",
         extras={"i18n_desc": {
             "de-DE": "Vergleicht zwei Charaktere nach Ausrüstung (Itemlevel pro Slot), Werten oder Statistiken.",

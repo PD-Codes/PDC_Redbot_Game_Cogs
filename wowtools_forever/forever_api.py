@@ -120,7 +120,7 @@ def not_available_msg(lang: str, feature_de: str, feature_en: Optional[str] = No
 async def resolve_character_args(cog, ctx, region: Optional[str], name: Optional[str], surname: Optional[str]):
     """Fill missing region/name/surname from the user's saved character settings.
 
-    Values come from ``wowtf-wowset character name/surname/region``; the region
+    Values come from ``wowtfset me name/surname/region``; the region
     additionally falls back to the server region. Returns
     ``(region, name, surname, error)`` where ``error`` is a ready-to-send message
     (or None when everything is known).
@@ -156,9 +156,9 @@ async def resolve_character_args(cog, ctx, region: Optional[str], name: Optional
         return region, name, surname, tr_lang(
             lang,
             "Bitte Region, Vorname und Nachname angeben oder deinen Charakter mit "
-            "`[p]wowtf-wowset character name|surname|region` speichern.",
+            "`/wowtfset me name|surname|region` speichern.",
             "Please provide region, first name and surname, or save your character with "
-            "`[p]wowtf-wowset character name|surname|region`.",
+            "`/wowtfset me name|surname|region`.",
         )
     return region, name, surname, None
 

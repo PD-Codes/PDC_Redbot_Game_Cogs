@@ -12,8 +12,11 @@ from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 from redbot.core.utils.views import _ACCEPTABLE_PAGE_TYPES, SimpleMenu
 
-from .autocomplete import GAME
+from .groups import WoWToolsGroups
+from .autocomplete import GAME, realm_choices
+from .blizzard_rest import get_access_token
 from .pdc_dashboard import tr_lang
+from .utils import get_realms
 
 log = logging.getLogger("red.karlo-cogs.wowtools")
 _ = Translator("WoWTools", __file__)
@@ -51,7 +54,7 @@ class Raiderio:
     """Cog for interaction with the classic.raider.io API"""
 
     @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
-    @commands.group(name="wowtc-raiderio", aliases=["wowtc-rio"])
+    @WoWToolsGroups.main_group.group(name="raiderio", aliases=["rio"])
     async def raiderio(self, ctx: commands.Context):
         """Commands for interacting with classic.raider.io"""
         pass
@@ -62,12 +65,23 @@ class Raiderio:
     @app_commands.describe(
         character="Name of the character to look up",
         realm="The character's realm",
+        region="Region (optional if the realm includes it or a server region is set)",
     )
-    async def raiderio_profile(self, ctx, character: str, *, realm: str) -> None:
+    @app_commands.choices(
+        region=[
+            app_commands.Choice(name="EU", value="eu"),
+            app_commands.Choice(name="US", value="us"),
+            app_commands.Choice(name="KR", value="kr"),
+            app_commands.Choice(name="TW", value="tw"),
+        ]
+    )
+    async def raiderio_profile(
+        self, ctx, character: str, *, realm: str, region: Optional[str] = None
+    ) -> None:
         """Display the classic.raider.io profile of a character.
 
         **Example:**
-        [p]raiderio profile Karlo Ragnaros
+        [p]wowtc raiderio profile Karlo Ragnaros
         """
         if ctx.interaction:
             # There is no contextual locale for interactions, so we need to set it manually
@@ -77,11 +91,11 @@ class Raiderio:
         try:
             realm, region = realm.split(sep=":", maxsplit=1)
         except ValueError:
-            region = await self.config.guild(ctx.guild).region()
+            region = region or await self.config.guild(ctx.guild).region()
             if not region:
                 await ctx.send(
                     _(
-                        "No region provided, and no default region set.\nSet a default region with `{prefix}wowset region` or provide a region with the realm like `{prefix}raiderio profile Karlo Ragnaros:EU`"
+                        "No region provided, and no default region set.\nSet a default region with `{prefix}wowtcset server region` or provide a region with the realm like `{prefix}wowtc raiderio profile Karlo Ragnaros:EU`"
                     ).format(prefix=ctx.prefix)
                 )
                 return
@@ -279,14 +293,28 @@ class Raiderio:
     @raiderio.command(name="guild")
     @commands.guild_only()
     @commands.bot_has_permissions(embed_links=True)
-    @app_commands.describe(guild="The name of the guild", realm="The guild's realm")
-    async def raiderio_guild(self, ctx: commands.Context, guild: str, *, realm: str) -> None:
+    @app_commands.describe(
+        guild="The name of the guild",
+        realm="The guild's realm",
+        region="Region (optional if the realm includes it or a server region is set)",
+    )
+    @app_commands.choices(
+        region=[
+            app_commands.Choice(name="EU", value="eu"),
+            app_commands.Choice(name="US", value="us"),
+            app_commands.Choice(name="KR", value="kr"),
+            app_commands.Choice(name="TW", value="tw"),
+        ]
+    )
+    async def raiderio_guild(
+        self, ctx: commands.Context, guild: str, *, realm: str, region: Optional[str] = None
+    ) -> None:
         """Display the classic.raider.io profile of a guild.
 
         If the guild or realm name have spaces in them, they need to be enclosed in quotes.
 
         Example:
-        [p]raiderio guild "Jahaci Rumene Kadulje" Ragnaros
+        [p]wowtc raiderio guild "Jahaci Rumene Kadulje" Ragnaros
         """
         if ctx.interaction:
             # There is no contextual locale for interactions, so we need to set it manually
@@ -296,11 +324,11 @@ class Raiderio:
         try:
             realm, region = realm.split(sep=":")
         except ValueError:
-            region = await self.config.guild(ctx.guild).region()
+            region = region or await self.config.guild(ctx.guild).region()
             if not region:
                 await ctx.send(
                     _(
-                        'No region provided, and no default region set.\nSet a default region with `{prefix}wowset region` or provide a region with the realm like `{prefix}raiderio guild "Jahaci Rumene Kadulje" Ragnaros:EU`'
+                        'No region provided, and no default region set.\nSet a default region with `{prefix}wowtcset server region` or provide a region with the realm like `{prefix}wowtc raiderio guild "Jahaci Rumene Kadulje" Ragnaros:EU`'
                     ).format(prefix=ctx.prefix)
                 )
                 return
@@ -367,6 +395,64 @@ class Raiderio:
 
         await ctx.send(embed=embed)
 
+    # ---------- Autocomplete ----------
+    async def _rio_realm_choices(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        """Live realm autocomplete.
+
+        With a known region (selected option, else the server default) the value is the
+        Blizzard realm slug (like charinfo); otherwise realms of all regions are offered
+        with ``"{slug}:{region}"`` values, which the commands split themselves.
+        """
+        region = getattr(interaction.namespace, "region", None)
+        if not region and interaction.guild:
+            region = await self.config.guild(interaction.guild).region()
+        if region:
+            return await realm_choices(
+                lambda r: get_access_token(self, r), region.lower(), current
+            )
+        return (await get_realms(self, current))[:25]
+
+    @raiderio_profile.autocomplete("realm")
+    async def raiderio_profile_realm_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        return await self._rio_realm_choices(interaction, current)
+
+    @raiderio_profile.autocomplete("character")
+    async def raiderio_profile_character_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        # Same source as the user-install profile command: the stored guild roster.
+        if not interaction.guild:
+            return []
+        roster = await self.config.guild(interaction.guild).guild_roster()
+        cur = (current or "").lower()
+        names = sorted({key.split(":")[0] for key in roster if cur in key.split(":")[0].lower()})
+        return [app_commands.Choice(name=n, value=n.lower()) for n in names[:25]]
+
+    @raiderio_guild.autocomplete("realm")
+    async def raiderio_guild_realm_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        return await self._rio_realm_choices(interaction, current)
+
+    @raiderio_guild.autocomplete("guild")
+    async def raiderio_guild_guild_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        # Suggest the guild configured for this server (serverset guild / gmset guild_name).
+        if not interaction.guild:
+            return []
+        conf = self.config.guild(interaction.guild)
+        cur = (current or "").lower()
+        names = []
+        for name in (await conf.real_guild_name(), await conf.gmanage_guild()):
+            if name and name not in names and cur in name.lower():
+                names.append(name)
+        return [app_commands.Choice(name=n[:100], value=n[:100]) for n in names]
+
     # @raiderio_guild.autocomplete("realm")
     # async def raiderio_guild_realm_autocomplete(
     #     self, interaction: discord.Interaction, current: str
@@ -376,6 +462,14 @@ class Raiderio:
 
     @raiderio.command(name="affixes")
     @commands.guild_only()
+    @app_commands.choices(
+        region=[
+            app_commands.Choice(name="EU", value="eu"),
+            app_commands.Choice(name="US", value="us"),
+            app_commands.Choice(name="KR", value="kr"),
+            app_commands.Choice(name="TW", value="tw"),
+        ]
+    )
     async def raiderio_affixes(self, ctx: commands.Context, region: str) -> None:
         """Display this week's affixes."""
         if ctx.interaction:

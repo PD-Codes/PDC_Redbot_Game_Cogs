@@ -5,7 +5,10 @@ import discord
 from bs4 import BeautifulSoup
 from discord import app_commands
 from rapidfuzz import fuzz
+from redbot.core import commands
 from redbot.core.i18n import Translator
+
+from ..groups import WoWToolsGroups
 
 _ = Translator("WoWTools", __file__)
 log = logging.getLogger("red.karlo-cogs.wowtools")
@@ -120,33 +123,31 @@ class CVar:
 class CVarDocs:
     """WoW CVar documentation"""
 
-    @app_commands.command(
-        name="wowt-cvar",
+    # Formerly the standalone user-installable slash command ``/wowt-cvar``. It is a
+    # subcommand of the main group now; subcommands cannot carry their own
+    # install/context/default-permission settings.
+    @WoWToolsGroups.main_group.command(
+        name="cvar",
         description="Get information about a WoW CVar",
     )
-    @app_commands.allowed_installs(guilds=True, users=True)
-    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    @app_commands.default_permissions(embed_links=True)
-    async def slash_cvar(self, interaction: discord.Interaction, cvar: str):
+    async def slash_cvar(self, ctx: commands.Context, cvar: str):
         """Get information about a WoW Console Variable"""
         if not self.cvar_cache:
             self.cvar_cache = await self.get_all_cvars()
 
         cvar = next((cvar_obj for cvar_obj in self.cvar_cache if cvar_obj.name == cvar), None)
         if not cvar:
-            return await interaction.response.send_message(
-                _("No CVar found with that name."), ephemeral=True
-            )
+            return await ctx.send(_("No CVar found with that name."), ephemeral=True)
 
-        embed = await self.create_cvar_embed(interaction, cvar)
+        embed = await self.create_cvar_embed(ctx, cvar)
 
-        view = CVarView(self.cvar_cache, cvar.name, interaction.user.id)
+        view = CVarView(self.cvar_cache, cvar.name, ctx.author.id)
         content = (
             f"Enable: `/console {cvar.name} 1`\nDisable: `/console {cvar.name} 0`"
             if isinstance(cvar.default, bool)
             else None
         )
-        await interaction.response.send_message(
+        await ctx.send(
             content=None or content,
             embed=embed,
             view=view,

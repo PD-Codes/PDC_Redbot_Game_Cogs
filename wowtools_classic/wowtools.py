@@ -19,7 +19,9 @@ from .user_installable.cvardocs import CVar, CVarDocs
 from .autocomplete import GAME
 from .blizzard_rest import reset_token_caches
 
+from .groups import WoWToolsGroups
 from .guildmanage import GuildManage
+from .legacy import LegacyCommands
 from .on_message import OnMessage
 from .pvp import PvP
 from .raiderio import Raiderio
@@ -52,11 +54,11 @@ from .pdc_dashboard import (
 log = logging.getLogger("red.karlo-cogs.wowtools")
 _ = Translator("WoWTools", __file__)
 
-# Names of the voice channels created by `serverset patchcountdown` start with one of
+# Names of the voice channels created by `wowtcset server patchcountdown` start with one of
 # these. Only such channels are ever renamed or deleted by the countdown logic.
 _COUNTDOWN_PREFIXES = ("🔴", "🟡")
 
-# Sister cogs that answer [[...]] messages as well (see serverset onmessage).
+# Sister cogs that answer [[...]] messages as well (see wowtcset server onmessage).
 _WOWTOOLS_COG_NAMES = ("WoWTools", "WoWToolsClassic", "WoWToolsForever")
 
 try:
@@ -88,6 +90,8 @@ class WoWToolsClassic(
     RaidInfo,
     CompareChars,
     UserInstallableRaiderio,
+    WoWToolsGroups,
+    LegacyCommands,
     commands.Cog,
 ):
     """Interact with various World of Warcraft APIs"""
@@ -248,12 +252,12 @@ class WoWToolsClassic(
         self.blizzard["us"] = WowApi(client_id=cid, client_secret=secret, client_region="us")
         self.blizzard["kr"] = WowApi(client_id=cid, client_secret=secret, client_region="kr")
 
-    @commands.group(name="wowtc-wowset")
+    @WoWToolsGroups.settings_group.group(name="bot", with_app_command=False)
     async def wowset(self, ctx):
-        """Change WoWTools settings."""
+        """Bot owner settings (Blizzard API, emotes, assistant integration, status)."""
         pass
 
-    @commands.hybrid_group(name="wowtc-serverset")
+    @WoWToolsGroups.settings_group.group(name="server")
     async def serverset(self, ctx):
         """Change WoW guild-related settings"""
         pass
@@ -313,7 +317,7 @@ class WoWToolsClassic(
         except Exception as e:
             await ctx.send(_("Command failed successfully. {e}").format(e=e), ephemeral=True)
 
-    @wowset.command(name="blizzard")
+    @wowset.command(name="blizzard", with_app_command=False)
     @commands.is_owner()
     async def wowset_blizzard(self, ctx: commands.Context):
         """Instructions for setting up the Blizzard API."""
@@ -326,7 +330,7 @@ class WoWToolsClassic(
         )
         return
 
-    @wowset.command(name="emote")
+    @wowset.command(name="emote", with_app_command=False)
     @commands.is_owner()
     async def wowset_emote(
         self, ctx: commands.Context, currency: str, emoji: discord.Emoji = None
@@ -357,9 +361,9 @@ class WoWToolsClassic(
             await self.config.guild(ctx.guild).sb_image.set(True)
             await ctx.send(_("Images enabled."), ephemeral=True)
 
-    @wowset.group(name="character")
+    @WoWToolsGroups.settings_group.group(name="me")
     async def wowset_character(self, ctx):
-        """Character settings."""
+        """Your own WoW character (name, realm, region)."""
         pass
 
     @wowset_character.command(name="name")
@@ -409,7 +413,7 @@ class WoWToolsClassic(
                 msg += "\n" + hint
             await ctx.send(msg)
 
-    @wowset.command(name="assintegration")
+    @wowset.command(name="assintegration", with_app_command=False)
     @commands.is_owner()
     async def wowset_assintegration(self, ctx: commands.Context):
         """Toggle the assistant cog integration."""
@@ -490,7 +494,7 @@ class WoWToolsClassic(
 
     @staticmethod
     def _is_countdown_channel(channel) -> bool:
-        """True only for voice channels created by `serverset patchcountdown`."""
+        """True only for voice channels created by `wowtcset server patchcountdown`."""
         return isinstance(channel, discord.VoiceChannel) and channel.name.startswith(
             _COUNTDOWN_PREFIXES
         )
@@ -566,7 +570,7 @@ class WoWToolsClassic(
         log.exception("Unhandled exception in update_countdown_channels task.", exc_info=error)
         self.update_countdown_channels.restart()
 
-    @wowset.command(name="status", hidden=True)
+    @wowset.command(name="status", hidden=True, with_app_command=False)
     @commands.is_owner()
     async def wowset_status(
         self,

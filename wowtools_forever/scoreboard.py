@@ -3,6 +3,7 @@ import logging
 from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 
+from .groups import wowtf, wowtfset
 from .forever_api import get_lang, not_available_msg
 
 log = logging.getLogger("red.karlo-cogs.wowtools_forever")
@@ -23,7 +24,7 @@ class Scoreboard:
         )
 
     @commands.cooldown(rate=1, per=10, type=commands.BucketType.user)
-    @commands.hybrid_group(name="wowtf-wowscoreboard", aliases=["wowtf-sb"])
+    @wowtf.group(name="scoreboard", aliases=["sb", "wowscoreboard"])
     @commands.guild_only()
     async def wowscoreboard(self, ctx: commands.Context):
         """Show various scoreboards for your guild (not available in WoW Forever)."""
@@ -35,7 +36,7 @@ class Scoreboard:
         """Get the Mythic+ scoreboard for this guild (not available in WoW Forever)."""
         await self._scoreboard_not_available(ctx)
 
-    @commands.hybrid_group(name="wowtf-sbset")
+    @wowtfset.group(name="scoreboard", aliases=["sb"])
     @commands.admin()
     @commands.guild_only()
     async def sbset(self, ctx):
@@ -49,35 +50,28 @@ class Scoreboard:
         """Set the scoreboard channel (not available in WoW Forever)."""
         await self._scoreboard_not_available(ctx)
 
-    @sbset.group(name="blacklist", aliases=["blocklist"])
-    @commands.admin()
-    @commands.guild_only()
-    async def sbset_blacklist(self, ctx: commands.Context):
-        """Manage the scoreboard blacklist (not available in WoW Forever)."""
-        pass
-
-    @sbset_blacklist.command(name="add")
+    @sbset.command(name="blacklist-add", aliases=["blocklist-add"])
     @commands.admin()
     @commands.guild_only()
     async def sbset_blacklist_add(self, ctx: commands.Context):
-        """Add characters to the blacklist (not available in WoW Forever)."""
+        """Add characters to the scoreboard blacklist (not available in WoW Forever)."""
         await self._scoreboard_not_available(ctx)
 
-    @sbset_blacklist.command(name="remove")
+    @sbset.command(name="blacklist-remove", aliases=["blocklist-remove"])
     @commands.admin()
     @commands.guild_only()
     async def sbset_blacklist_remove(self, ctx: commands.Context):
         """Remove characters from the blacklist (not available in WoW Forever)."""
         await self._scoreboard_not_available(ctx)
 
-    @sbset_blacklist.command(name="list")
+    @sbset.command(name="blacklist-list", aliases=["blocklist-list"])
     @commands.admin()
     @commands.guild_only()
     async def sbset_blacklist_list(self, ctx: commands.Context):
         """List blacklisted characters (not available in WoW Forever)."""
         await self._scoreboard_not_available(ctx)
 
-    @sbset_blacklist.command(name="clear")
+    @sbset.command(name="blacklist-clear", aliases=["blocklist-clear"])
     @commands.admin()
     @commands.guild_only()
     async def sbset_blacklist_clear(self, ctx: commands.Context):

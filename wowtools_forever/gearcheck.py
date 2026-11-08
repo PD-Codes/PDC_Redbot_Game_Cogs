@@ -7,6 +7,7 @@ from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_guild
 from .autocomplete import _LANG_CODES
+from .groups import wowtf
 from .forever_api import (
     display_name,
     explain_character_error,
@@ -81,8 +82,8 @@ class GearCheck(commands.Cog):
         return await fetch_item_levels(self, region, item_ids, locale=locale, concurrency=concurrency)
 
     # --------------- Command ---------------
-    @commands.hybrid_command(
-        name="wowtf-gearcheck",
+    @wowtf.command(
+        name="gearcheck",
         description="Show a character's equipped gear with item level, sockets and enchants.",
         extras={"i18n_desc": {
             "de-DE": "Zeigt die angelegte Ausrüstung eines Charakters mit Itemlevel, Sockeln und Verzauberungen.",

@@ -11,6 +11,7 @@ from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_guild
 
+from .groups import WoWToolsGroups
 from .autocomplete import (
     REGIONS,
     realm_choices,
@@ -300,7 +301,7 @@ class RaidInfo(commands.Cog):
     def __init__(self, bot: Red) -> None:
         self.bot = bot
 
-    @commands.hybrid_command(name="wowt-raidinfo")
+    @WoWToolsGroups.main_group.command(name="raidinfo")
     @app_commands.describe(
         region="Region (eu/us/kr/tw)",
         realm="Realm (use a hyphen instead of spaces)",

@@ -5,6 +5,7 @@ from discord import app_commands
 from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 
+from .groups import send_group_help, wowtf
 from .forever_api import get_lang, not_available_msg
 
 log = logging.getLogger("red.karlo-cogs.wowtools_forever")
@@ -22,12 +23,13 @@ class Raiderio:
         await ctx.send(not_available_msg(lang, "Raider.IO"), ephemeral=True)
 
     @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
-    @commands.group(name="wowtf-raiderio", aliases=["wowtf-rio"])
+    @wowtf.group(name="raiderio", aliases=["rio"])
     async def raiderio(self, ctx: commands.Context):
         """Raider.IO commands (not available in WoW Forever)."""
-        pass
+        await send_group_help(ctx)
 
     @raiderio.command(name="profile")
+    @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
     @app_commands.describe(name="Character first name", surname="Character surname")
     async def raiderio_profile(
         self, ctx: commands.Context, name: Optional[str] = None, surname: Optional[str] = None
@@ -36,11 +38,13 @@ class Raiderio:
         await self._raiderio_not_available(ctx)
 
     @raiderio.command(name="guild")
+    @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
     async def raiderio_guild(self, ctx: commands.Context, *, guild: Optional[str] = None) -> None:
         """Display the Raider.IO profile of a guild (not available in WoW Forever)."""
         await self._raiderio_not_available(ctx)
 
     @raiderio.command(name="affixes")
+    @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
     async def raiderio_affixes(self, ctx: commands.Context, region: Optional[str] = None) -> None:
         """Display this week's Mythic+ affixes (not available in WoW Forever)."""
         if ctx.interaction:

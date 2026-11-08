@@ -23,18 +23,18 @@ msgid "Get the current auction price of an item."
 msgstr ""
 
 #: wowtools/auctionhouse.py:21
-msgid "Please set a region with `{prefix}wowset region` before using this command."
-msgstr "Prije korištenja ove naredbe postavite regiju s `{prefix}wowset region`."
+msgid "Please set a region with `{prefix}wowtcset server region` before using this command."
+msgstr "Prije korištenja ove naredbe postavite regiju s `{prefix}wowtcset server region`."
 
 #: wowtools/auctionhouse.py:29
 msgid "The Auction House is not available in China.\n"
-"Please set a different region with `{prefix}wowset region`."
+"Please set a different region with `{prefix}wowtcset server region`."
 msgstr "Aukcijska kuća nije dostupna u Kini.\n"
-"Molim da postavite drugu regiju s `{prefix}wowset region`."
+"Molim da postavite drugu regiju s `{prefix}wowtcset server region`."
 
 #: wowtools/auctionhouse.py:40
-msgid "Please set a realm with `{prefix}wowset realm` before using this command."
-msgstr "Prije korištenja ove naredbe postavite realm s `{prefix}wowset realm`."
+msgid "Please set a realm with `{prefix}wowtcset server realm` before using this command."
+msgstr "Prije korištenja ove naredbe postavite realm s `{prefix}wowtcset server realm`."
 
 #: wowtools/auctionhouse.py:80
 msgid "No results found."
@@ -210,7 +210,7 @@ msgid "Find a member in the guild."
 msgstr "Pronađite člana u guildu."
 
 #: wowtools/guildmanage.py:449
-msgid "Please use `{prefix}gmset` and set the name and realm of your guild."
+msgid "Please use `{prefix}wowtcset guild` and set the name and realm of your guild."
 msgstr ""
 
 #: wowtools/guildmanage.py:482 wowtools/guildmanage.py:490
@@ -262,16 +262,16 @@ msgstr ""
 #, docstring
 msgid "Display the classic.raider.io profile of a character.\n\n"
 "        **Example:**\n"
-"        [p]raiderio profile Karlo Ragnaros\n"
+"        [p]wowtc raiderio profile Karlo Ragnaros\n"
 "        "
 msgstr "Prikaži classic.raider.io profil nekog lika.\n\n"
 "        **Primjer:**\n"
-"        [p]raiderio profile Karlo Ragnaros\n"
+"        [p]wowtc raiderio profile Karlo Ragnaros\n"
 "        "
 
 #: wowtools/raiderio.py:49
 msgid "No region provided, and no default region set.\n"
-"Set a default region with `{prefix}wowset region` or provide a region with the realm like `{prefix}raiderio profile Karlo Ragnaros:EU`"
+"Set a default region with `{prefix}wowtcset server region` or provide a region with the realm like `{prefix}wowtc raiderio profile Karlo Ragnaros:EU`"
 msgstr ""
 
 #: wowtools/raiderio.py:78
@@ -311,17 +311,17 @@ msgstr "Zadnje ažuriranje: {char_last_updated}"
 msgid "Display the classic.raider.io profile of a guild.\n\n"
 "        If the guild or realm name have spaces in them, they need to be enclosed in quotes.\n\n"
 "        Example:\n"
-"        [p]raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros\n"
+"        [p]wowtc raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros\n"
 "        "
 msgstr "Prikaži classic.raider.io profil guilda.\n\n"
 "        Ako naziv guilda ili naziv realma ima razmake, moraju biti u navodnicima.\n\n"
 "        Primjer:\n"
-"        [p]raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros\n"
+"        [p]wowtc raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros\n"
 "        "
 
 #: wowtools/raiderio.py:256
 msgid "No region provided, and no default region set.\n"
-"Set a default region with `{prefix}wowset region` or provide a region with the realm like `{prefix}raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros:EU`"
+"Set a default region with `{prefix}wowtcset server region` or provide a region with the realm like `{prefix}wowtc raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros:EU`"
 msgstr ""
 
 #: wowtools/raiderio.py:280
@@ -509,21 +509,21 @@ msgstr "Ažurira se samo kada dođe do promjene u poretku"
 
 #: wowtools/scoreboard.py:529 wowtools/scoreboard.py:656
 msgid "\n"
-"A server admin needs to set a region with `{prefix}wowset region` first."
+"A server admin needs to set a region with `{prefix}wowtcset server region` first."
 msgstr "\n"
-"Administrator servera prvo mora postaviti regiju s `{prefix}wowset region`."
+"Administrator servera prvo mora postaviti regiju s `{prefix}wowtcset server region`."
 
 #: wowtools/scoreboard.py:535 wowtools/scoreboard.py:663
 msgid "\n"
-"A server admin needs to set a realm with `{prefix}wowset realm` first."
+"A server admin needs to set a realm with `{prefix}wowtcset server realm` first."
 msgstr "\n"
-"Administrator servera prvo mora postaviti realm s `{prefix}wowset realm`."
+"Administrator servera prvo mora postaviti realm s `{prefix}wowtcset server realm`."
 
 #: wowtools/scoreboard.py:541 wowtools/scoreboard.py:670
 msgid "\n"
-"A server admin needs to set a guild name with `{prefix}wowset guild` first."
+"A server admin needs to set a guild name with `{prefix}wowtcset server guild` first."
 msgstr "\n"
-"Administrator servera prvo mora postaviti regiju s `{prefix}wowset guild`."
+"Administrator servera prvo mora postaviti regiju s `{prefix}wowtcset server guild`."
 
 #: wowtools/scoreboard.py:652
 msgid "Rating"

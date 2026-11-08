@@ -11,6 +11,7 @@ from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_g
 from .autocomplete import (
     _LANG_CODES as AC_LANG_CODES,
 )
+from .groups import wowtf
 from .forever_api import (
     display_name,
     explain_character_error,
@@ -251,8 +252,8 @@ class CompareChars(commands.Cog):
     def __init__(self, bot: Red) -> None:
         self.bot = bot
 
-    @commands.hybrid_command(
-        name="wowtf-comparechars",
+    @wowtf.command(
+        name="comparechars",
         description="Compare two characters by gear (item level per slot), info or statistics.",
         extras={"i18n_desc": {
             "de-DE": "Vergleicht zwei Charaktere nach Ausrüstung (Itemlevel pro Slot), Werten oder Statistiken.",

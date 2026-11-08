@@ -3,6 +3,7 @@ from typing import Optional
 from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 
+from .groups import wowtf
 from .forever_api import get_lang, not_available_msg
 
 _ = Translator("WoWToolsForever", __file__)
@@ -12,7 +13,7 @@ class PvP:
     # WoW Forever (original game, level 60) has no arena/RBG/Solo Shuffle ratings and
     # no PvP ladder API, so this command only answers with a friendly notice.
     @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
-    @commands.hybrid_command(name="wowtf-rating")
+    @wowtf.command(name="rating")
     async def rating(self, ctx, name: Optional[str] = None, surname: Optional[str] = None):
         """Check a character's PvP ratings (not available in WoW Forever)."""
         if ctx.interaction:

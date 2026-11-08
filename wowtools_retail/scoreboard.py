@@ -13,6 +13,7 @@ from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 from redbot.core.utils.chat_formatting import box, humanize_list, humanize_number
 from tabulate import tabulate
 
+from .groups import WoWToolsGroups
 from .autocomplete import GAME
 from .blizzard_rest import BlizzardAPIError, fetch_character, fetch_guild_roster
 from .pdc_dashboard import tr_lang
@@ -40,7 +41,7 @@ class Scoreboard:
         return True
 
     @commands.cooldown(rate=1, per=10, type=commands.BucketType.user)
-    @commands.hybrid_group(name="wowt-wowscoreboard", aliases=["wowt-sb"])
+    @WoWToolsGroups.main_group.group(name="scoreboard", aliases=["sb"])
     @commands.guild_only()
     async def wowscoreboard(self, ctx: commands.Context):
         """Show various scoreboards for your guild."""
@@ -98,7 +99,7 @@ class Scoreboard:
     #         # TODO: In dpy2, make this a list of embeds to send in a single message
     #         await ctx.send(embed=embed)
 
-    @commands.hybrid_group(name="wowt-sbset")
+    @WoWToolsGroups.settings_group.group(name="scoreboard", aliases=["sb"])
     @commands.admin()
     @commands.guild_only()
     async def sbset(self, ctx):
@@ -164,14 +165,7 @@ class Scoreboard:
         await self.config.guild(ctx.guild).scoreboard_message.set(sb_msg.id)
         await ctx.send(_("Scoreboard channel set."))
 
-    @sbset.group(name="blacklist", aliases=["blocklist"])
-    @commands.admin()
-    @commands.guild_only()
-    async def sbset_blacklist(self, ctx: commands.Context):
-        """Manage the scoreboard blacklist."""
-        pass
-
-    @sbset_blacklist.command(name="add")
+    @sbset.command(name="blacklist-add", aliases=["blocklist-add"])
     @commands.admin()
     @commands.guild_only()
     async def sbset_blacklist_add(self, ctx: commands.Context, *, characters: str):
@@ -187,7 +181,7 @@ class Scoreboard:
         await self.config.guild(ctx.guild).scoreboard_blacklist.set(blacklist)
         await ctx.send(_("Blacklisted characters added."))
 
-    @sbset_blacklist.command(name="remove")
+    @sbset.command(name="blacklist-remove", aliases=["blocklist-remove"])
     @commands.admin()
     @commands.guild_only()
     async def sbset_blacklist_remove(self, ctx: commands.Context, *, characters: str):
@@ -204,7 +198,7 @@ class Scoreboard:
         await self.config.guild(ctx.guild).scoreboard_blacklist.set(blacklist)
         await ctx.send(_("Blacklisted characters removed."))
 
-    @sbset_blacklist.command(name="list")
+    @sbset.command(name="blacklist-list", aliases=["blocklist-list"])
     @commands.admin()
     @commands.guild_only()
     async def sbset_blacklist_list(self, ctx: commands.Context):
@@ -217,7 +211,7 @@ class Scoreboard:
             _("Blacklisted characters: {characters}").format(characters=humanize_list(blacklist))
         )
 
-    @sbset_blacklist.command(name="clear")
+    @sbset.command(name="blacklist-clear", aliases=["blocklist-clear"])
     @commands.admin()
     @commands.guild_only()
     async def sbset_blacklist_clear(self, ctx: commands.Context):
@@ -582,19 +576,19 @@ class Scoreboard:
         if not region:
             raise ValueError(
                 _(
-                    "\nA server admin needs to set a region with `{prefix}wowset region` first."
+                    "\nA server admin needs to set a region with `{prefix}wowtset server region` first."
                 ).format(prefix="" if ctx.interaction else ctx.clean_prefix)
             )
         if not realm:
             raise ValueError(
                 _(
-                    "\nA server admin needs to set a realm with `{prefix}wowset realm` first."
+                    "\nA server admin needs to set a realm with `{prefix}wowtset server realm` first."
                 ).format(prefix="" if ctx.interaction else ctx.clean_prefix)
             )
         if not guild_name:
             raise ValueError(
                 _(
-                    "\nA server admin needs to set a guild name with `{prefix}wowset guild` first."
+                    "\nA server admin needs to set a guild name with `{prefix}wowtset server guild` first."
                 ).format(prefix="" if ctx.interaction else ctx.clean_prefix)
             )
 
@@ -710,21 +704,21 @@ class Scoreboard:
         if not region:
             await ctx.send(
                 _(
-                    "\nA server admin needs to set a region with `{prefix}wowset region` first."
+                    "\nA server admin needs to set a region with `{prefix}wowtset server region` first."
                 ).format(prefix="" if ctx.interaction else ctx.clean_prefix)
             )
             return None
         if not realm:
             await ctx.send(
                 _(
-                    "\nA server admin needs to set a realm with `{prefix}wowset realm` first."
+                    "\nA server admin needs to set a realm with `{prefix}wowtset server realm` first."
                 ).format(prefix="" if ctx.interaction else ctx.clean_prefix)
             )
             return None
         if not guild_name:
             await ctx.send(
                 _(
-                    "\nA server admin needs to set a guild name with `{prefix}wowset guild` first."
+                    "\nA server admin needs to set a guild name with `{prefix}wowtset server guild` first."
                 ).format(prefix="" if ctx.interaction else ctx.clean_prefix)
             )
             return None

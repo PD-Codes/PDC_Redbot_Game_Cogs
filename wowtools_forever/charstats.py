@@ -10,6 +10,7 @@ from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_g
 from .autocomplete import (
     _LANG_CODES as AC_LANG_CODES,
 )
+from .groups import wowtf
 from .forever_api import (
     display_name,
     explain_character_error,
@@ -65,8 +66,8 @@ class CharStats(commands.Cog):
     def __init__(self, bot: Red) -> None:
         self.bot = bot
 
-    @commands.hybrid_command(
-        name="wowtf-charstats",
+    @wowtf.command(
+        name="charstats",
         description="Show achievement statistics highlights (kills, deaths, quests, instances, records).",
         extras={"i18n_desc": {
             "de-DE": "Zeigt Highlights der Erfolgs-Statistiken (Kills, Tode, Quests, Instanzen, Rekorde).",

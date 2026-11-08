@@ -14,6 +14,7 @@ from redbot.core.utils.chat_formatting import humanize_list
 from tabulate import tabulate
 
 from .exceptions import InvalidBlizzardAPI
+from .groups import wowtf, wowtfset
 from .forever_api import fetch_guild, guild_slug, member_display_name
 from .pdc_dashboard import tr_lang
 
@@ -26,8 +27,8 @@ _MAX_DETAILED_EVENTS = 20
 
 
 class GuildManage:
-    @commands.hybrid_group(
-        name="wowtf-gmset",
+    @wowtfset.group(
+        name="guild",
         description="Configure guild management.",
         extras={"i18n_desc": {
             "de-DE": "Gildenverwaltung konfigurieren.",
@@ -49,6 +50,7 @@ class GuildManage:
         }},
     )
     @commands.admin()
+    @commands.guild_only()
     @app_commands.describe(rank="Rank number (1-10)", rank_string="The label to bind to the rank")
     async def gmset_rankstring(self, ctx: commands.Context, rank: int, *, rank_string: str):
         """Bind a rank to a string."""
@@ -72,6 +74,7 @@ class GuildManage:
         }},
     )
     @commands.admin()
+    @commands.guild_only()
     @app_commands.describe(rank="Rank number (1-10)", role="The role to bind to the rank")
     async def gmset_rankrole(self, ctx: commands.Context, rank: int, role: discord.Role):
         """Bind a rank to a role."""
@@ -90,6 +93,7 @@ class GuildManage:
         }},
     )
     @commands.admin()
+    @commands.guild_only()
     async def gmset_view(self, ctx: commands.Context):
         """View guild rank settings."""
         guild: discord.Guild = ctx.guild
@@ -125,6 +129,7 @@ class GuildManage:
         }},
     )
     @commands.admin()
+    @commands.guild_only()
     @app_commands.describe(guild_name="The in-game guild name (empty = clear)")
     async def guild_name(self, ctx: commands.Context, *, guild_name: Optional[str] = None):
         """Set the guild name to be used in the guild management commands."""
@@ -225,7 +230,7 @@ class GuildManage:
             return
         except AttributeError:
             await ctx.send(
-                _("Please use `{prefix}wowtf-gmset` and set the name of your guild (and `{prefix}wowtf-serverset region`).").format(
+                _("Please use `{prefix}wowtfset guild guild_name` and set the name of your guild (and `{prefix}wowtfset server region`).").format(
                     prefix=ctx.prefix
                 )
             )
@@ -270,7 +275,7 @@ class GuildManage:
             return
         except AttributeError:
             await ctx.send(
-                _("Please use `{prefix}wowtf-gmset` and set the name of your guild (and `{prefix}wowtf-serverset region`).").format(
+                _("Please use `{prefix}wowtfset guild guild_name` and set the name of your guild (and `{prefix}wowtfset server region`).").format(
                     prefix=ctx.prefix
                 )
             )
@@ -556,8 +561,8 @@ class GuildManage:
         rank_strings: dict = await self.config.guild(guild).guild_rankstrings()
         return rank_strings.get(str(rank), f"Rank {rank}")
 
-    @commands.hybrid_group(
-        name="wowtf-gmanage",
+    @wowtf.group(
+        name="gmanage",
         description="Guild management commands.",
         extras={"i18n_desc": {
             "de-DE": "Befehle zur Gildenverwaltung.",
@@ -593,7 +598,7 @@ class GuildManage:
             ingame_members, rank = (None, None)
         except AttributeError:
             await ctx.send(
-                _("Please use `{prefix}wowtf-gmset` and set the name of your guild (and `{prefix}wowtf-serverset region`).").format(
+                _("Please use `{prefix}wowtfset guild guild_name` and set the name of your guild (and `{prefix}wowtfset server region`).").format(
                     prefix=ctx.prefix
                 )
             )

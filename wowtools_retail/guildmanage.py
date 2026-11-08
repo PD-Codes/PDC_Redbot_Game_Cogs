@@ -11,6 +11,7 @@ from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 from redbot.core.utils.chat_formatting import humanize_list
 from tabulate import tabulate
 
+from .groups import WoWToolsGroups
 from .autocomplete import GAME
 from .blizzard_rest import BlizzardAPIError, fetch_guild_roster
 from .exceptions import InvalidBlizzardAPI
@@ -21,8 +22,8 @@ log = logging.getLogger("red.karlo-cogs.wowtools")
 
 
 class GuildManage:
-    @commands.hybrid_group(
-        name="wowt-gmset",
+    @WoWToolsGroups.settings_group.group(
+        name="guild",
         description="Configure guild management.",
         extras={"i18n_desc": {
             "de-DE": "Gildenverwaltung konfigurieren.",
@@ -192,7 +193,7 @@ class GuildManage:
     async def _roster_error_message(self, ctx: commands.Context, error: Exception) -> str:
         lang = await self.config.guild(ctx.guild).language() if ctx.guild else "en-US"
         if isinstance(error, AttributeError):
-            return _("Please use `{prefix}gmset` and set the name and realm of your guild.").format(
+            return _("Please use `{prefix}wowtset guild` and set the name and realm of your guild.").format(
                 prefix=ctx.prefix
             )
         if isinstance(error, BlizzardAPIError) and error.status == 404:
@@ -548,8 +549,8 @@ class GuildManage:
         rank_strings: dict = await self.config.guild(guild).guild_rankstrings()
         return rank_strings.get(str(rank), f"Rank {rank}")
 
-    @commands.hybrid_group(
-        name="wowt-gmanage",
+    @WoWToolsGroups.main_group.group(
+        name="gmanage",
         description="Guild management commands.",
         extras={"i18n_desc": {
             "de-DE": "Befehle zur Gildenverwaltung.",
@@ -585,7 +586,7 @@ class GuildManage:
             ingame_members, rank = (None, None)
         except AttributeError:
             await ctx.send(
-                _("Please use `{prefix}gmset` and set the name and realm of your guild.").format(
+                _("Please use `{prefix}wowtset guild` and set the name and realm of your guild.").format(
                     prefix=ctx.prefix
                 )
             )

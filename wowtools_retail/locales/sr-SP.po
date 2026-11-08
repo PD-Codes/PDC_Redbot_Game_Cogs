@@ -23,16 +23,16 @@ msgid "Get the current auction price of an item."
 msgstr ""
 
 #: wowtools/auctionhouse.py:21
-msgid "Please set a region with `{prefix}wowset region` before using this command."
+msgid "Please set a region with `{prefix}wowtset server region` before using this command."
 msgstr "Подесите регион са `{prefix}вовсет регион` пре употребе ове команде."
 
 #: wowtools/auctionhouse.py:29
 msgid "The Auction House is not available in China.\n"
-"Please set a different region with `{prefix}wowset region`."
+"Please set a different region with `{prefix}wowtset server region`."
 msgstr ""
 
 #: wowtools/auctionhouse.py:40
-msgid "Please set a realm with `{prefix}wowset realm` before using this command."
+msgid "Please set a realm with `{prefix}wowtset server realm` before using this command."
 msgstr "Подесите област са `{prefix}вовсет реалм` пре употребе ове команде."
 
 #: wowtools/auctionhouse.py:80
@@ -209,7 +209,7 @@ msgid "Find a member in the guild."
 msgstr ""
 
 #: wowtools/guildmanage.py:449
-msgid "Please use `{prefix}gmset` and set the name and realm of your guild."
+msgid "Please use `{prefix}wowtset guild` and set the name and realm of your guild."
 msgstr ""
 
 #: wowtools/guildmanage.py:482 wowtools/guildmanage.py:490
@@ -261,13 +261,13 @@ msgstr ""
 #, docstring
 msgid "Display the classic.raider.io profile of a character.\n\n"
 "        **Example:**\n"
-"        [p]raiderio profile Karlo Ragnaros\n"
+"        [p]wowt raiderio profile Karlo Ragnaros\n"
 "        "
 msgstr ""
 
 #: wowtools/raiderio.py:49
 msgid "No region provided, and no default region set.\n"
-"Set a default region with `{prefix}wowset region` or provide a region with the realm like `{prefix}raiderio profile Karlo Ragnaros:EU`"
+"Set a default region with `{prefix}wowtset server region` or provide a region with the realm like `{prefix}wowt raiderio profile Karlo Ragnaros:EU`"
 msgstr ""
 
 #: wowtools/raiderio.py:78
@@ -307,7 +307,7 @@ msgstr "Последње ажурирано: {char_last_updated}"
 msgid "Display the classic.raider.io profile of a guild.\n\n"
 "        If the guild or realm name have spaces in them, they need to be enclosed in quotes.\n\n"
 "        Example:\n"
-"        [p]raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros\n"
+"        [p]wowt raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros\n"
 "        "
 msgstr "Прикажи раидер.ио профил цеха.\n\n"
 "        Ако име цеха или царства има размаке, потребно их је ставити у наводнике.\n\n"
@@ -317,7 +317,7 @@ msgstr "Прикажи раидер.ио профил цеха.\n\n"
 
 #: wowtools/raiderio.py:256
 msgid "No region provided, and no default region set.\n"
-"Set a default region with `{prefix}wowset region` or provide a region with the realm like `{prefix}raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros:EU`"
+"Set a default region with `{prefix}wowtset server region` or provide a region with the realm like `{prefix}wowt raiderio guild \"Jahaci Rumene Kadulje\" Ragnaros:EU`"
 msgstr ""
 
 #: wowtools/raiderio.py:280
@@ -504,17 +504,17 @@ msgstr ""
 
 #: wowtools/scoreboard.py:529 wowtools/scoreboard.py:656
 msgid "\n"
-"A server admin needs to set a region with `{prefix}wowset region` first."
+"A server admin needs to set a region with `{prefix}wowtset server region` first."
 msgstr ""
 
 #: wowtools/scoreboard.py:535 wowtools/scoreboard.py:663
 msgid "\n"
-"A server admin needs to set a realm with `{prefix}wowset realm` first."
+"A server admin needs to set a realm with `{prefix}wowtset server realm` first."
 msgstr ""
 
 #: wowtools/scoreboard.py:541 wowtools/scoreboard.py:670
 msgid "\n"
-"A server admin needs to set a guild name with `{prefix}wowset guild` first."
+"A server admin needs to set a guild name with `{prefix}wowtset server guild` first."
 msgstr ""
 
 #: wowtools/scoreboard.py:652

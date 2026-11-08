@@ -8,6 +8,7 @@ from discord import app_commands
 from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 
+from .groups import WoWToolsGroups
 from .blizzard_rest import BlizzardAPIError, api_get, fetch_character, realm_slug
 from .exceptions import InvalidBlizzardAPI
 from .pdc_dashboard import tr_lang
@@ -77,7 +78,7 @@ def _season_achievements(achievements: dict, limit: int = 4) -> List[str]:
 
 class PvP:
     @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
-    @commands.hybrid_command(name="wowtc-rating")
+    @WoWToolsGroups.main_group.command(name="rating")
     @commands.bot_has_permissions(embed_links=True)
     async def rating(self, ctx, character: str, *, realm: str):
         """Check a character's PVP ratings."""

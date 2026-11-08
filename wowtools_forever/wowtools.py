@@ -12,7 +12,9 @@ from redbot.core.utils.chat_formatting import humanize_list
 
 from .user_installable.cvardocs import CVar, CVarDocs
 
+from .groups import WoWTFGroups, send_group_help, wowtfset
 from .guildmanage import GuildManage
+from .legacy import LegacyRedirects
 from .on_message import OnMessage
 from .pvp import PvP
 from .raiderio import Raiderio
@@ -74,6 +76,8 @@ class WoWToolsForever(
     RaidInfo,
     CompareChars,
     UserInstallableRaiderio,
+    LegacyRedirects,
+    WoWTFGroups,
     commands.Cog,
 ):
     """Interact with the World of Warcraft: Forever APIs (characters are name + surname, no realms)."""
@@ -155,12 +159,13 @@ class WoWToolsForever(
         # region). Changing the credentials only needs the cached tokens to be dropped.
         reset_token_cache(self)
 
-    @commands.group(name="wowtf-wowset")
+    # Bot-owner settings: prefix-only, like the former wowtf-wowset group.
+    @wowtfset.group(name="bot", with_app_command=False)
     async def wowset(self, ctx):
-        """Change WoWTools Forever settings."""
-        pass
+        """Bot owner settings for WoWTools Forever."""
+        await send_group_help(ctx)
 
-    @commands.hybrid_group(name="wowtf-serverset")
+    @wowtfset.group(name="server")
     async def serverset(self, ctx):
         """Change WoW guild-related settings"""
         pass
@@ -203,7 +208,7 @@ class WoWToolsForever(
         except Exception as e:
             await ctx.send(_("Command failed successfully. {e}").format(e=e), ephemeral=True)
 
-    @wowset.command(name="blizzard")
+    @wowset.command(name="blizzard", with_app_command=False)
     @commands.is_owner()
     async def wowset_blizzard(self, ctx: commands.Context):
         """Instructions for setting up the Blizzard API."""
@@ -216,7 +221,7 @@ class WoWToolsForever(
         )
         return
 
-    @wowset.command(name="emote")
+    @wowset.command(name="emote", with_app_command=False)
     @commands.is_owner()
     async def wowset_emote(
         self, ctx: commands.Context, currency: str, emoji: discord.Emoji = None
@@ -244,10 +249,12 @@ class WoWToolsForever(
             not_available_msg(lang, "Mythic+-Scoreboard", "Mythic+ scoreboard"), ephemeral=True
         )
 
-    @wowset.group(name="character")
+    # Former "wowtf-wowset character ..." (prefix-only); now also a slash subgroup
+    # so every user can save the character used as default by /wowtf commands.
+    @wowtfset.group(name="me")
     async def wowset_character(self, ctx):
-        """Character settings."""
-        pass
+        """Your saved WoW Forever character (default for /wowtf commands)."""
+        await send_group_help(ctx)
 
     @wowset_character.command(name="name")
     async def wowset_character_name(self, ctx, character_name: str):
@@ -297,7 +304,7 @@ class WoWToolsForever(
             hint = await self.onmessage_conflict_hint(ctx.guild, await get_lang(self, ctx))
             await ctx.send(f"{msg}\n{hint}" if hint else msg)
 
-    @wowset.command(name="assintegration")
+    @wowset.command(name="assintegration", with_app_command=False)
     @commands.is_owner()
     async def wowset_assintegration(self, ctx: commands.Context):
         """Toggle the assistant cog integration."""
@@ -321,7 +328,7 @@ class WoWToolsForever(
             not_available_msg(lang, "Patch-Countdown-Kanal", "Patch countdown channel"), ephemeral=True
         )
 
-    @wowset.command(name="status", hidden=True)
+    @wowset.command(name="status", hidden=True, with_app_command=False)
     @commands.is_owner()
     async def wowset_status(self, ctx: commands.Context, *, args: Optional[str] = None):
         """Set the guild whose raid progression is shown as the bot's status.

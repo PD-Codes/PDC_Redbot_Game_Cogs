@@ -8,6 +8,7 @@ from discord import app_commands
 from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 
+from .groups import WoWToolsGroups
 from .blizzard_rest import reset_token_caches
 from .utils import format_to_gold
 
@@ -105,7 +106,7 @@ def _can_embed(ctx: commands.Context) -> bool:
 
 
 class Token:
-    @commands.hybrid_command(name="wowtc-wowtoken")
+    @WoWToolsGroups.main_group.command(name="token")
     async def wowtoken(self, ctx: commands.Context, region: Literal["eu", "us", "kr", "tw", "all"] = "eu"):
         """Check price of WoW token in a region"""
         if ctx.interaction and ctx.guild:

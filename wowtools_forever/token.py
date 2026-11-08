@@ -5,6 +5,7 @@ import discord
 from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 
+from .groups import wowtf
 from .forever_api import ForeverAPIError, api_get, get_lang, not_available_msg
 from .utils import format_to_gold
 
@@ -23,7 +24,7 @@ async def _fetch_token_price(self, region: str, locale: str = "en_US") -> dict:
 
 
 class Token:
-    @commands.hybrid_command(name="wowtf-wowtoken")
+    @wowtf.command(name="token")
     async def wowtoken(self, ctx: commands.Context, region: Literal["eu", "us", "kr", "tw", "all"] = "eu"):
         """Check price of the WoW token in a region or `all` regions (if WoW Forever has one)."""
         if ctx.interaction and ctx.guild is not None:

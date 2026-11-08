@@ -9,6 +9,7 @@ from discord import app_commands
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_guild
+from .groups import WoWToolsGroups
 from .autocomplete import _LANG_CODES, _API_HOST, _AUTH_HOST, realm_choices
 from .blizzard_rest import character_segment, realm_segment, reset_token_caches
 from .pdc_dashboard import tr_lang
@@ -229,8 +230,8 @@ class GearCheck(commands.Cog):
         return results
 
     # --------------- Command ---------------
-    @commands.hybrid_command(
-        name="wowtc-gearcheck",
+    @WoWToolsGroups.main_group.command(
+        name="gearcheck",
         description="Show a character's equipped gear with item level, sockets and enchants.",
         extras={"i18n_desc": {
             "de-DE": "Zeigt die angelegte Ausrüstung eines Charakters mit Itemlevel, Sockeln und Verzauberungen.",
