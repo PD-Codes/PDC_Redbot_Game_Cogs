@@ -9,6 +9,7 @@ from __future__ import annotations
 try:
     from pdc_webdashboard.integration.context import DashboardContext  # noqa: F401
     from pdc_webdashboard.integration.decorators import (  # noqa: F401
+        dashboard_list,
         dashboard_page,
         dashboard_panel,
         dashboard_widget,
@@ -64,8 +65,21 @@ except Exception:  # pdc_webdashboard not installed
 
         return deco
 
+    def _noop_list(*_args, **_kwargs):
+        def deco(func):
+            def _passthrough(f):
+                return f
+
+            func.on_delete = _passthrough  # type: ignore[attr-defined]
+            func.edit_form = _passthrough  # type: ignore[attr-defined]
+            func.on_edit = _passthrough  # type: ignore[attr-defined]
+            return func
+
+        return deco
+
     dashboard_widget = dashboard_page = _noop_decorator  # type: ignore
     dashboard_panel = _noop_panel  # type: ignore
+    dashboard_list = _noop_list  # type: ignore
 
     class _Stub:
         def __init__(self, *_a, **_k):

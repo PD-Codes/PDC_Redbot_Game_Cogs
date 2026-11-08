@@ -170,17 +170,17 @@ class WoWTools(
         self.release_time: dict[str, datetime.datetime] = {}
         # Expansion "early access", or patch release without raid/m+
         self.early_access_time["us"] = datetime.datetime(
-            year=2025, month=8, day=15, hour=15, tzinfo=datetime.UTC
+            year=2025, month=8, day=15, hour=15, tzinfo=datetime.timezone.utc
         )
         self.early_access_time["eu"] = datetime.datetime(
-            year=2025, month=8, day=6, hour=4, tzinfo=datetime.UTC
+            year=2025, month=8, day=6, hour=4, tzinfo=datetime.timezone.utc
         )
         # Full expansion release, or season release with raid/m+
         self.release_time["us"] = datetime.datetime(
-            year=2025, month=8, day=12, hour=15, tzinfo=datetime.UTC
+            year=2025, month=8, day=12, hour=15, tzinfo=datetime.timezone.utc
         )
         self.release_time["eu"] = datetime.datetime(
-            year=2025, month=8, day=13, hour=4, tzinfo=datetime.UTC
+            year=2025, month=8, day=13, hour=4, tzinfo=datetime.timezone.utc
         )
 
     async def cog_load(self) -> None:
@@ -444,7 +444,7 @@ class WoWTools(
             await ctx.send(_("Countdown channel removed"))
             return
 
-        now = datetime.datetime.now(datetime.UTC)
+        now = datetime.datetime.now(datetime.timezone.utc)
         early_access_time = self.early_access_time.get(region)
         release_time = self.release_time.get(region)
         if not early_access_time or not release_time:
@@ -521,7 +521,7 @@ class WoWTools(
                 await self.config.guild(guild).countdown_channel.clear()
                 continue
 
-            now = datetime.datetime.now(datetime.UTC)
+            now = datetime.datetime.now(datetime.timezone.utc)
             early_access_time = self.early_access_time.get(region)
             release_time = self.release_time.get(region)
             if not early_access_time or not release_time:
