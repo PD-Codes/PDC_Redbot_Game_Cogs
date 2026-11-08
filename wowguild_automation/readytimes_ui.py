@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import discord
 
@@ -199,8 +199,6 @@ class MemberReadyTimesView(discord.ui.View):
                 tr_lang(glang, "Nur für dich.", "Just for you."), ephemeral=True
             )
             return
-        raw = await self.cog.config.member(self.member).ready_times()
-        data = _merge_ready_times(raw)
         await interaction.response.send_modal(ReadyDayModal(self.cog, self.member, self._day_key, self.lang))
 
     @discord.ui.button(label="Übersicht aktualisieren", style=discord.ButtonStyle.secondary, row=1)

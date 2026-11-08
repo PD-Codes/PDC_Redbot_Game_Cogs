@@ -7,10 +7,12 @@ dashboard (a table with add/edit/delete). Opt-in per guild, bilingual (DE/EN).
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import logging
 import random
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import discord
 from discord import app_commands
@@ -32,6 +34,7 @@ from .pdc_dashboard import (
 log = logging.getLogger("red.pdc.triviagame")
 
 ANSWER_TIME = 25  # seconds per question
+MAX_TEXT_LEN = 1000  # max characters for a question / answer string
 
 _DEFAULT_QUESTIONS = [
     {"q": "What is the capital of France?", "a": "Paris", "alts": []},
@@ -68,13 +71,32 @@ class TriviaGame(commands.Cog):
             await self.config.member_from_ids(guild_id, user_id).clear()
 
     async def red_get_data_for_user(self, *, user_id: int) -> dict:
-        """Return stored points for the given user (per guild)."""
+        """Return stored points for the given user (per guild) as a file."""
         data = {}
         all_members = await self.config.all_members()
         for guild_id, members in all_members.items():
             if user_id in members:
                 data[str(guild_id)] = members[user_id]
-        return data
+        return {"triviagame.json": io.BytesIO(json.dumps(data, default=str).encode("utf-8"))}
+
+    # ------------------------------------------------------------------ #
+    # Question helpers (stable IDs)
+    # ------------------------------------------------------------------ #
+    async def _questions(self, guild) -> List[dict]:
+        """Return the guild's questions; legacy entries without an ID get one."""
+        conf = self.config.guild(guild).questions
+        qs = await conf()
+        if any(not q.get("id") for q in qs):
+            async with conf() as stored:
+                for q in stored:
+                    if not q.get("id"):
+                        q["id"] = uuid.uuid4().hex
+            qs = await conf()
+        return qs
+
+    @staticmethod
+    def _too_long(question: str, answer: str) -> bool:
+        return len(question) > MAX_TEXT_LEN or len(answer) > MAX_TEXT_LEN
 
     @staticmethod
     def _t(lang: str, de: str, en: str) -> str:
@@ -94,6 +116,12 @@ class TriviaGame(commands.Cog):
             return
         sess = self._active.get(message.channel.id)
         if not sess or sess.get("winner"):
+            return
+        if await self.bot.cog_disabled_in_guild(self, message.guild):
+            return
+        if not await self.bot.ignored_channel_or_guild(message):
+            return
+        if not await self.bot.allowed_by_whitelist_blacklist(message.author):
             return
         if message.content.strip().lower() in sess["answers"]:
             sess["winner"] = message.author
@@ -123,7 +151,7 @@ class TriviaGame(commands.Cog):
         sess = {"answers": set(), "winner": None, "event": asyncio.Event(), "stopped": False}
         self._active[ctx.channel.id] = sess
         try:
-            pool = await self.config.guild(ctx.guild).questions()
+            pool = await self._questions(ctx.guild)
             if not pool:
                 await ctx.send(self._t(lang, "Keine Fragen hinterlegt.", "No questions configured."))
                 return
@@ -157,7 +185,9 @@ class TriviaGame(commands.Cog):
                 winner = sess.get("winner")
                 if winner is not None:
                     round_scores[winner.id] = round_scores.get(winner.id, 0) + 1
-                    await self.config.member(winner).points.set((await self.config.member(winner).points()) + 1)
+                    points = self.config.member(winner).points
+                    async with points.get_lock():
+                        await points.set((await points()) + 1)
                     await ctx.send(self._t(lang, f"✅ {winner.mention} richtig! Antwort: **{q.get('a')}**",
                                            f"✅ {winner.mention} got it! Answer: **{q.get('a')}**"))
                 else:
@@ -248,31 +278,45 @@ class TriviaGame(commands.Cog):
         if not parts:
             await ctx.send(self._t(lang, "Antwort fehlt.", "Answer is empty."))
             return
+        if self._too_long(question.strip(), answer):
+            await ctx.send(self._t(lang, f"Frage/Antwort zu lang (max. {MAX_TEXT_LEN} Zeichen).", f"Question/answer too long (max {MAX_TEXT_LEN} characters)."))
+            return
+        await self._questions(ctx.guild)
         async with self.config.guild(ctx.guild).questions() as qs:
-            qs.append({"q": question.strip(), "a": parts[0], "alts": parts[1:]})
+            qs.append({"id": uuid.uuid4().hex, "q": question.strip(), "a": parts[0], "alts": parts[1:]})
         await ctx.send(self._t(lang, "Frage hinzugefügt.", "Question added."))
 
     @quizset.command(name="list")
     async def q_list(self, ctx: commands.Context) -> None:
         """List the questions."""
         lang = await self._lang(ctx.guild)
-        qs = await self.config.guild(ctx.guild).questions()
+        qs = await self._questions(ctx.guild)
         if not qs:
             await ctx.send(self._t(lang, "Keine Fragen.", "No questions."))
             return
-        body = "\n".join(f"**{i}.** {q.get('q')} — `{q.get('a')}`" for i, q in enumerate(qs, start=1))
+        body = "\n".join(f"**{i}.** `{str(q.get('id', ''))[:8]}` {q.get('q')} — `{q.get('a')}`" for i, q in enumerate(qs, start=1))
         await ctx.send(embed=discord.Embed(title=self._t(lang, "Fragen", "Questions"), description=body[:4000], colour=await ctx.embed_colour()))
 
     @quizset.command(name="remove")
-    @app_commands.describe(index="Question number from 'quizset list'")
-    async def q_remove(self, ctx: commands.Context, index: int) -> None:
-        """Remove a question by its number."""
+    @app_commands.describe(ref="Question ID (8 characters) or number from 'quizset list'")
+    async def q_remove(self, ctx: commands.Context, ref: str) -> None:
+        """Remove a question by its ID (preferred) or its list number."""
         lang = await self._lang(ctx.guild)
+        ref = ref.strip().lower()
+        await self._questions(ctx.guild)
+        ok = False
         async with self.config.guild(ctx.guild).questions() as qs:
-            ok = 1 <= index <= len(qs)
-            if ok:
-                qs.pop(index - 1)
-        await ctx.send(self._t(lang, "Entfernt." if ok else "Ungültige Nummer.", "Removed." if ok else "Invalid number."))
+            idx = None
+            if len(ref) == 8:
+                matches = [i for i, q in enumerate(qs) if str(q.get("id", "")).startswith(ref)]
+                if len(matches) == 1:
+                    idx = matches[0]
+            if idx is None and ref.isdigit() and 1 <= int(ref) <= len(qs):
+                idx = int(ref) - 1
+            if idx is not None:
+                qs.pop(idx)
+                ok = True
+        await ctx.send(self._t(lang, "Entfernt." if ok else "Ungültige ID/Nummer.", "Removed." if ok else "Invalid ID/number."))
 
     @quizset.command(name="language")
     @app_commands.describe(language="Output language: de-DE or en-US")
@@ -321,22 +365,19 @@ class TriviaGame(commands.Cog):
                       "Question → answer. Separate alternatives with |. Add new ones in the 'Add question' tab."),
     )
     async def questions_list(self, ctx):
-        qs = await self.config.guild(ctx.guild).questions()
+        qs = await self._questions(ctx.guild)
         rows = []
-        for i, q in enumerate(qs):
+        for q in qs:
             a = q.get("a", "")
             if q.get("alts"):
                 a = " | ".join([a, *q.get("alts")])
-            rows.append({"id": str(i), "cells": {"q": str(q.get("q", ""))[:80], "a": str(a)[:60]}})
+            rows.append({"id": str(q["id"]), "cells": {"q": str(q.get("q", ""))[:80], "a": str(a)[:60]}})
         return rows
 
     @questions_list.edit_form
     async def questions_edit_form(self, ctx, item_id):
-        qs = await self.config.guild(ctx.guild).questions()
-        try:
-            q = qs[int(item_id)]
-        except (ValueError, IndexError):
-            q = {}
+        qs = await self._questions(ctx.guild)
+        q = next((x for x in qs if str(x.get("id")) == str(item_id)), {})
         a = q.get("a", "")
         if q.get("alts"):
             a = " | ".join([a, *q.get("alts")])
@@ -348,22 +389,33 @@ class TriviaGame(commands.Cog):
     @questions_list.on_edit
     async def questions_edit(self, ctx, item_id, data):
         lang = await self.config.guild(ctx.guild).language()
-        parts = [p.strip() for p in str(data.get("a") or "").split("|") if p.strip()]
+        question = str(data.get("q") or "").strip()
+        raw = str(data.get("a") or "")
+        parts = [p.strip() for p in raw.split("|") if p.strip()]
+        if not question or not parts:
+            return SubmitResult.fail(tr_lang(lang, "Frage und Antwort erforderlich.", "Question and answer required."))
+        if self._too_long(question, raw):
+            return SubmitResult.fail(tr_lang(lang, f"Zu lang (max. {MAX_TEXT_LEN} Zeichen).", f"Too long (max {MAX_TEXT_LEN} characters)."))
+        await self._questions(ctx.guild)
         async with self.config.guild(ctx.guild).questions() as qs:
-            try:
-                idx = int(item_id)
-                qs[idx] = {"q": str(data.get("q") or "").strip(), "a": parts[0] if parts else "", "alts": parts[1:]}
-            except (ValueError, IndexError):
+            for q in qs:
+                if str(q.get("id")) == str(item_id):
+                    q["q"], q["a"], q["alts"] = question, parts[0], parts[1:]
+                    break
+            else:
                 return SubmitResult.fail(tr_lang(lang, "Nicht gefunden.", "Not found."))
         return SubmitResult.ok(tr_lang(lang, "Frage gespeichert.", "Question saved."))
 
     @questions_list.on_delete
     async def questions_delete(self, ctx, item_id):
         lang = await self.config.guild(ctx.guild).language()
+        await self._questions(ctx.guild)
         async with self.config.guild(ctx.guild).questions() as qs:
-            try:
-                qs.pop(int(item_id))
-            except (ValueError, IndexError):
+            for i, q in enumerate(qs):
+                if str(q.get("id")) == str(item_id):
+                    qs.pop(i)
+                    break
+            else:
                 return SubmitResult.fail(tr_lang(lang, "Nicht gefunden.", "Not found."))
         return SubmitResult.ok(tr_lang(lang, "Frage gelöscht.", "Question deleted."), reload=True)
 
@@ -382,9 +434,13 @@ class TriviaGame(commands.Cog):
     async def _question_add(self, ctx, data):
         lang = await self.config.guild(ctx.guild).language()
         q = str(data.get("q") or "").strip()
-        parts = [p.strip() for p in str(data.get("a") or "").split("|") if p.strip()]
+        raw = str(data.get("a") or "")
+        parts = [p.strip() for p in raw.split("|") if p.strip()]
         if not q or not parts:
             return SubmitResult.fail(tr_lang(lang, "Frage und Antwort erforderlich.", "Question and answer required."))
+        if self._too_long(q, raw):
+            return SubmitResult.fail(tr_lang(lang, f"Zu lang (max. {MAX_TEXT_LEN} Zeichen).", f"Too long (max {MAX_TEXT_LEN} characters)."))
+        await self._questions(ctx.guild)
         async with self.config.guild(ctx.guild).questions() as qs:
-            qs.append({"q": q, "a": parts[0], "alts": parts[1:]})
+            qs.append({"id": uuid.uuid4().hex, "q": q, "a": parts[0], "alts": parts[1:]})
         return SubmitResult.ok(tr_lang(lang, "Frage angelegt.", "Question added."), reload=True)

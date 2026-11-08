@@ -32,7 +32,7 @@ ENCOUNTER_ID = {
     1574: "Primordius",
     1576: "Dark Animus",
     1579: "Iron Qon",
-    1570: "Twin Consorts",
+    1560: "Twin Consorts",
     1580: "Lei Shen",
     1581: "Ra-den",
 
@@ -57,24 +57,20 @@ ENCOUNTER_ZONES = {
     "Mogu'shan Vaults": [1395, 1390, 1434, 1436, 1500, 1407],
     "Heart of Fear": [1549, 1550, 1551, 1552, 1553, 1554],
     "Terrace of Endless Spring": [1409, 1505, 1506, 1507],
-    "Throne of Thunder": [1577, 1575, 1570, 1565, 1578, 1573, 1572, 1574, 1576, 1579, 1570, 1580, 1581],
+    "Throne of Thunder": [1577, 1575, 1570, 1565, 1578, 1573, 1572, 1574, 1576, 1579, 1560, 1580, 1581],
     "Siege of Orgrimmar": [1622, 1623, 1624, 1625, 1627, 1628, 1629, 1630, 1631, 1632, 1633, 1634, 1635, 1636],
 }
 
-ZONES_BY_ID = {
-    317: "Mogu'shan Vaults",
-    330: "Heart of Fear",
-    320: "Terrace of Endless Spring",
-    362: "Throne of Thunder",
-    369: "Siege of Orgrimmar",
-}
-
-ZONES_BY_SHORT_NAME = {
-    "MSV": ["Mogu'shan Vaults", 317],
-    "HoF": ["Heart of Fear", 330],
-    "ToES": ["Terrace of Endless Spring", 320],
-    "ToT": ["Throne of Thunder", 362],
-    "SoO": ["Siege of Orgrimmar", 369],
+# Zones are loaded live from the WCL API (worldData.zones): the former
+# ZONES_BY_ID / ZONES_BY_SHORT_NAME ids were Blizzard instance ids, not WCL zone
+# ids. Only the short names are kept, as case-insensitive aliases that are
+# resolved against the live zone names.
+ZONE_ALIASES = {
+    "msv": "Mogu'shan Vaults",
+    "hof": "Heart of Fear",
+    "toes": "Terrace of Endless Spring",
+    "tot": "Throne of Thunder",
+    "soo": "Siege of Orgrimmar",
 }
 
 DIFFICULTIES = {

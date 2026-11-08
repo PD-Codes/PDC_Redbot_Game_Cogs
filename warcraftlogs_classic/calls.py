@@ -73,3 +73,23 @@ class Queries:
   }
 }
 """
+
+    get_zones = """
+    query {
+  worldData {
+    zones {
+      id
+      name
+      frozen
+      difficulties {
+        id
+        name
+      }
+      encounters {
+        id
+        name
+      }
+    }
+  }
+}
+"""

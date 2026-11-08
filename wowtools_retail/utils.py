@@ -2,7 +2,8 @@ from discord import app_commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import humanize_number
 
-from .autocomplete import REALMS
+from .autocomplete import realm_choices
+from .blizzard_rest import get_access_token
 
 _ = Translator("WoWTools", __file__)
 
@@ -62,19 +63,13 @@ def format_to_gold(price: int, emotes: dict = None) -> str:
     return gold_text + silver_text + copper_text
 
 
-async def get_realms(current):
-    realms = []
-    for realm in REALMS.keys():
-        if current.lower() not in realm.lower():
-            continue
-        if len(REALMS[realm]) == 1:
-            realms.append(app_commands.Choice(name=realm, value=f"{realm}:{REALMS[realm][0]}"))
-        else:
-            realms.extend(
-                app_commands.Choice(name=f"{realm} ({region})", value=f"{realm}:{region}")
-                for region in REALMS[realm]
-            )
-    return realms
+async def get_realms(cog, current: str, region: str | None = None) -> list[app_commands.Choice[str]]:
+    """Live realm autocomplete with ``"{slug}:{region}"`` values.
 
-
-
+    Uses the realm index of this cog's game (retail or classic). Without a known
+    region, the realms of all supported regions are offered.
+    """
+    regions = [region.lower()] if region else ["eu", "us", "kr"]
+    return await realm_choices(
+        lambda r: get_access_token(cog, r), regions, current, with_region=True
+    )

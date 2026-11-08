@@ -1,15 +1,78 @@
+import asyncio
+import re
+import time
 from typing import List, Optional
 
 import discord
-from aiohttp import ClientResponseError
-from aiowowapi import RetailApi
 from discord import app_commands
 from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 
+from .blizzard_rest import BlizzardAPIError, api_get, fetch_character, realm_slug
+from .exceptions import InvalidBlizzardAPI
+from .pdc_dashboard import tr_lang
 from .utils import get_realms
 
 _ = Translator("WoWTools", __file__)
+
+# Season reward titles, matched on the en_US achievement names, e.g.
+# "Gladiator: The War Within Season 2" or "Combatant I: Midnight Season 1".
+# Higher number = better reward. Replaces the old hard-coded achievement ids.
+_PVP_TITLE_ORDER = (
+    ("combatant i", 1),
+    ("combatant ii", 2),
+    ("challenger i", 3),
+    ("challenger ii", 4),
+    ("rival i", 5),
+    ("rival ii", 6),
+    ("duelist", 7),
+    ("elite", 8),
+    ("gladiator", 9),
+    ("legend", 10),
+    ("strategist", 10),
+    ("hero of the horde", 11),
+    ("hero of the alliance", 11),
+)
+_RE_SEASON_ACHI = re.compile(r"^(?P<title>[^:]+):\s*(?P<season>.*\bSeason\s+\d+)\s*$", re.IGNORECASE)
+_PVP_SEASON_TTL = 6 * 3600  # seconds
+
+
+def _title_rank(title: str) -> int:
+    t = title.strip().casefold()
+    best = 0
+    for key, rank in _PVP_TITLE_ORDER:
+        # exact title or a named variant ("Malevolent Gladiator") - but not "Rival II" for "Rival I"
+        if t == key or t.endswith(" " + key):
+            best = max(best, rank)
+    return best
+
+
+def _season_achievements(achievements: dict, limit: int = 4) -> List[str]:
+    """Best completed PvP season title per season, newest seasons first."""
+    per_season: dict[str, tuple[int, int, str]] = {}
+    for entry in (achievements or {}).get("achievements") or []:
+        if not isinstance(entry, dict) or not entry.get("completed_timestamp"):
+            continue
+        achi = entry.get("achievement") or {}
+        name = achi.get("name")
+        if not isinstance(name, str):
+            continue
+        m = _RE_SEASON_ACHI.match(name)
+        if not m:
+            continue
+        rank = _title_rank(m.group("title"))
+        if not rank:
+            continue
+        season = m.group("season").strip()
+        achi_id = int(entry.get("id") or achi.get("id") or 0)
+        prev = per_season.get(season)
+        if prev is None or rank > prev[0]:
+            per_season[season] = (rank, max(achi_id, prev[1] if prev else 0), name)
+        else:
+            per_season[season] = (prev[0], max(achi_id, prev[1]), prev[2])
+    # Newer seasons have higher achievement ids.
+    ordered = sorted(per_season.values(), key=lambda v: v[1], reverse=True)
+    return [v[2] for v in ordered[:limit]]
 
 
 class PvP:
@@ -22,18 +85,34 @@ class PvP:
             # There is no contextual locale for interactions, so we need to set it manually
             # (This is probably a bug in Red, remove this when it's fixed)
             await set_contextual_locales_from_guild(self.bot, ctx.guild)
+        lang = await self.config.guild(ctx.guild).language() if ctx.guild else "en-US"
 
         if ":" in realm:
-            realm, region = realm.split(sep=":")
-            region = region.lower()
+            realm, region = realm.rsplit(sep=":", maxsplit=1)
+            region = region.strip().lower()
         else:
-            region = await self.config.guild(ctx.guild).region()
-        try:
-            api_client = self.blizzard.get(region)
-        except Exception as e:
-            await ctx.send(_("Command failed successfully. {e}").format(e=e))
+            region = await self.config.guild(ctx.guild).region() if ctx.guild else None
+        if not region:
+            await ctx.send(
+                tr_lang(
+                    lang,
+                    "Keine Region angegeben. Nutze `Realm:Region` (z. B. `Ragnaros:EU`).",
+                    "No region given. Use `Realm:Region` (e.g. `Ragnaros:EU`).",
+                )
+            )
             return
-        if not api_client:
+
+        realm = realm_slug(realm, region)
+
+        rbg_rating = "0"
+        duo_rating = "0"
+        tri_rating = "0"
+
+        await ctx.defer()
+        try:
+            await self.limiter.acquire()
+            profile = await fetch_character(self, region, realm, character)
+        except InvalidBlizzardAPI:
             await ctx.send(
                 _(
                     "The Blizzard API is not properly set up.\n"
@@ -43,153 +122,47 @@ class PvP:
                 ).format(prefix=ctx.prefix)
             )
             return
-
-        realm = await api_client.get_realm_slug(realm)
-
-        rbg_rating = "0"
-        duo_rating = "0"
-        tri_rating = "0"
-
-        await ctx.defer()
-        async with api_client:
-            wow_client = api_client.Classic
-            try:
-                await self.limiter.acquire()
-                profile = await wow_client.Profile.get_character_profile_summary(
-                    character_name=character, realm_slug=realm
-                )
-            except ClientResponseError:
+        except BlizzardAPIError as e:
+            if e.status == 403:
                 await ctx.send(
-                    _('Character "{character_name}" not found.').format(character_name=character)
+                    tr_lang(
+                        lang,
+                        "PvP-Wertungen sind für dieses Spiel über die Blizzard-API nicht verfügbar.",
+                        "PvP ratings are not available for this game via the Blizzard API.",
+                    )
                 )
                 return
-
-            await self.limiter.acquire()
-            achievements = await wow_client.Profile.get_character_achievements_summary(
-                character_name=character, realm_slug=realm
+            await ctx.send(
+                _('Character "{character_name}" not found.').format(character_name=character)
             )
+            return
 
-            await self.limiter.acquire()
-            media = await wow_client.Profile.get_character_media_summary(
-                character_name=character, realm_slug=realm
-            )
+        async def optional(sub: str) -> dict:
+            # Sub resources may be missing (no rated games, endpoint not in namespace).
+            try:
+                await self.limiter.acquire()
+                return await fetch_character(self, region, realm, character, sub)
+            except (BlizzardAPIError, InvalidBlizzardAPI, asyncio.TimeoutError):
+                return {}
 
-            try:
-                await self.limiter.acquire()
-                rbg_statistics = await wow_client.Profile.get_character_pvp_bracket_statistics(
-                    character_name=character,
-                    realm_slug=realm,
-                    pvp_bracket="rbg",
-                )
-            except ClientResponseError:
-                rbg_statistics = {}
-            try:
-                await self.limiter.acquire()
-                duo_statistics = await wow_client.Profile.get_character_pvp_bracket_statistics(
-                    character_name=character,
-                    realm_slug=realm,
-                    pvp_bracket="2v2",
-                )
-            except ClientResponseError:
-                duo_statistics = {}
-            try:
-                await self.limiter.acquire()
-                tri_statistics = await wow_client.Profile.get_character_pvp_bracket_statistics(
-                    character_name=character,
-                    realm_slug=realm,
-                    pvp_bracket="3v3",
-                )
-            except ClientResponseError:
-                tri_statistics = {}
-            try:
-                await self.limiter.acquire()
-                shuffle_rating = await self.get_shuffle_rating(wow_client, profile)
-                await self.limiter.acquire()
-                shuffle_rank = await self.get_shuffle_rank(wow_client, profile)
-            except ClientResponseError:
-                shuffle_rating = None
-                shuffle_rank = None
+        achievements = await optional("achievements")
+        media = await optional("character-media")
+        rbg_statistics = await optional("pvp-bracket/rbg")
+        duo_statistics = await optional("pvp-bracket/2v2")
+        tri_statistics = await optional("pvp-bracket/3v3")
+        shuffle_rating, shuffle_rank = await self.get_shuffle_entry(region, profile)
 
         if "name" not in profile:
             await ctx.send(_("That character or realm does not exist."))
             return
 
         real_char_name: str = profile["name"]
-        char_img_url: str = media["assets"][0]["value"]
-        char_race: str = profile["race"]["name"]
-        char_class: str = profile["character_class"]["name"]
-        char_faction: str = profile["faction"]["name"]
+        char_img_url = self._media_url(media)
+        char_race: str = (profile.get("race") or {}).get("name", "?")
+        char_class: str = (profile.get("character_class") or {}).get("name", "?")
+        char_faction: str = (profile.get("faction") or {}).get("name", "")
 
-        # TODO: Fetch current expansion seasons programmatically
-        season_achievements = {
-            # Hero of the Horde, Hero of the Alliance, Gladiator, Elite, Duelist, Rival, Challenger, Combatant
-            # Shadowlands
-            "Season 2": (
-                14976,
-                14975,
-                14972,
-                14974,
-                14971,
-                14970,
-                14969,
-                14968,
-            ),
-            "Season 3": (
-                15356,
-                15355,
-                15352,
-                15354,
-                15351,
-                15350,
-                15349,
-                15348,
-            ),
-            "Season 4": (
-                15607,
-                15608,
-                15605,
-                15639,
-                15604,
-                15603,
-                15602,
-                15601,
-                15600,
-                15610,
-                15609,
-            ),
-            # Dragonflight
-            "Season 1": (
-                15958,
-                15959,
-                15951,
-                15984,
-                15954,
-                15952,
-                15953,
-                15955,
-                15956,
-                15960,
-                15961,
-            ),
-        }
-        own_season_achievements = {
-            "Season 2": {},
-            "Season 3": {},
-            "Season 4": {},
-            "Season 1": {},
-        }
-        for char_achievement in achievements["achievements"]:
-            achi_id: int = char_achievement["id"]
-            for season, value_ in season_achievements.items():
-                if achi_id in value_:
-                    own_season_achievements[season][achi_id] = char_achievement["achievement"][
-                        "name"
-                    ]
-        achi_to_post = [
-            own_season_achievements[season][max(own_season_achievements[season].keys())]
-            for season, value__ in own_season_achievements.items()
-            if value__ != {}
-        ]
+        achi_to_post = _season_achievements(achievements)
         if char_faction != "Horde":
             color = discord.Color.blue()
         else:
@@ -208,7 +181,8 @@ class PvP:
             description=f"{char_race} {char_class}",
             url=f"https://worldofwarcraft.com/en-gb/character/{region}/{realm}/{real_char_name}",
         )
-        embed.set_thumbnail(url=char_img_url)
+        if char_img_url:
+            embed.set_thumbnail(url=char_img_url)
         embed.add_field(name=_("RBG Rating"), value=rbg_rating)
         embed.add_field(name=_("2v2 Rating"), value=duo_rating)
         embed.add_field(name=_("3v3 Rating"), value=tri_rating)
@@ -218,12 +192,7 @@ class PvP:
         )
         if shuffle_rank:
             embed.add_field(name=_("Shuffle Rank"), value=shuffle_rank)
-        if (
-            own_season_achievements["Season 1"] != {}
-            or own_season_achievements["Season 2"] != {}
-            or own_season_achievements["Season 3"] != {}
-            or own_season_achievements["Season 4"] != {}
-        ):
+        if achi_to_post:
             embed.add_field(name=_("Achievements"), value="\n".join(achi_to_post), inline=False)
 
         details_url = (
@@ -245,51 +214,88 @@ class PvP:
     async def rating_realm_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> List[app_commands.Choice[str]]:
-        realms = await get_realms(current)
+        region = None
+        if interaction.guild:
+            region = await self.config.guild(interaction.guild).region()
+        realms = await get_realms(self, current, region)
         return realms[:25]
 
     @staticmethod
-    async def get_shuffle_rating(wow_client: RetailApi, profile: dict) -> Optional[int]:
-        leaderboard = await PvP.get_shuffle_leaderboard(wow_client, profile)
-        return next(
-            (
-                entry["rating"]
-                for entry in leaderboard["entries"]
-                if entry["character"]["name"] == profile["name"]
-            ),
-            None,
-        )
+    def _media_url(media: dict) -> Optional[str]:
+        assets = [a for a in (media or {}).get("assets") or [] if isinstance(a, dict)]
+        for wanted in ("avatar", "inset", "main"):
+            for a in assets:
+                if a.get("key") == wanted and a.get("value"):
+                    return a["value"]
+        if assets and assets[0].get("value"):
+            return assets[0]["value"]
+        # Older profile media format
+        return (media or {}).get("avatar_url")
 
-    @staticmethod
-    async def get_shuffle_rank(wow_client: RetailApi, profile: dict) -> str | None:
-        leaderboard = await PvP.get_shuffle_leaderboard(wow_client, profile)
-        rank: int | None = next(
+    async def get_current_pvp_season_id(self, region: str) -> Optional[int]:
+        """Current PvP season id from ``/data/wow/pvp-season/index`` (cached 6h)."""
+        cache = getattr(self, "_pvp_season_cache", None)
+        if cache is None:
+            cache = self._pvp_season_cache = {}
+        hit = cache.get(region)
+        if hit and time.time() - hit[0] < _PVP_SEASON_TTL:
+            return hit[1]
+        try:
+            js = await api_get(self, region, "/data/wow/pvp-season/index", kind="dynamic")
+        except (BlizzardAPIError, InvalidBlizzardAPI, asyncio.TimeoutError):
+            return None
+        season_id = (js.get("current_season") or {}).get("id")
+        if season_id is None:
+            ids = [s.get("id") for s in js.get("seasons") or [] if isinstance(s, dict)]
+            season_id = max((i for i in ids if isinstance(i, int)), default=None)
+        if season_id is not None:
+            cache[region] = (time.time(), season_id)
+        return season_id
+
+    async def get_shuffle_entry(self, region: str, profile: dict) -> tuple[Optional[int], Optional[str]]:
+        """(rating, rank string) of the character on the Solo Shuffle leaderboard."""
+        leaderboard = await self.get_shuffle_leaderboard(region, profile)
+        entry = next(
             (
-                entry["rank"]
-                for entry in leaderboard["entries"]
-                if entry["character"]["name"] == profile["name"]
+                e
+                for e in (leaderboard or {}).get("entries") or []
+                if isinstance(e, dict) and (e.get("character") or {}).get("name") == profile.get("name")
             ),
             None,
         )
+        if not entry:
+            return None, None
+        rank: Optional[int] = entry.get("rank")
         if not rank:
-            return None
+            return entry.get("rating"), None
 
         if 11 <= (rank % 100) <= 13:
             suffix = "th"
         else:
             suffix = ["th", "st", "nd", "rd", "th"][min(rank % 10, 4)]
-        return str(rank) + suffix
+        return entry.get("rating"), str(rank) + suffix
 
-    @staticmethod
-    async def get_shuffle_leaderboard(wow_client: RetailApi, profile: dict):
-        char_class: str = profile["character_class"]["name"]
+    async def get_shuffle_leaderboard(self, region: str, profile: dict) -> dict:
+        char_class: str = (profile.get("character_class") or {}).get("name") or ""
         char_class = char_class.lower().replace(" ", "")
 
-        char_spec: str = profile["active_spec"]["name"]
+        char_spec: str = (profile.get("active_spec") or {}).get("name") or ""
         char_spec = char_spec.lower().replace(" ", "")
+        if not char_class or not char_spec:
+            return {}
 
+        season_id = await self.get_current_pvp_season_id(region)
+        if season_id is None:
+            return {}
         pvp_bracket = f"shuffle-{char_class}-{char_spec}"
-        return await wow_client.GameData.get_pvp_leaderboard(
-            pvp_season_id=34,
-            pvp_bracket=pvp_bracket,
-        )
+        try:
+            await self.limiter.acquire()
+            # Solo Shuffle does not exist in classic -> 404, handled as "not on leaderboard".
+            return await api_get(
+                self,
+                region,
+                f"/data/wow/pvp-season/{season_id}/pvp-leaderboard/{pvp_bracket}",
+                kind="dynamic",
+            )
+        except (BlizzardAPIError, InvalidBlizzardAPI, asyncio.TimeoutError):
+            return {}

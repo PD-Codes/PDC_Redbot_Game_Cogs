@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List
 import discord
 
 from .pdc_dashboard import tr_lang
+from .character_helpers import GAME_FOREVER, is_forever, version_requires_realm
 
 if TYPE_CHECKING:
     from .wowguild_automation import WowGuildAutomation
@@ -16,12 +17,15 @@ class GuildSettingsModal(discord.ui.Modal, title="WoW-Gildenprofil (aktives Prof
     region = discord.ui.TextInput(label="Region", placeholder="eu", default="eu", max_length=8, required=True)
     version = discord.ui.TextInput(
         label="Version",
-        placeholder="retail oder mop_classic",
+        placeholder="retail, mop_classic oder forever",
         default="retail",
         max_length=32,
         required=True,
     )
-    realm = discord.ui.TextInput(label="Realm (Slug)", placeholder="tarren-mill", max_length=64, required=True)
+    # Optional because WoW Forever has no realms; enforced in on_submit for all other versions.
+    realm = discord.ui.TextInput(
+        label="Realm-Slug (leer bei WoW Forever)", placeholder="tarren-mill", max_length=64, required=False
+    )
     guild_name = discord.ui.TextInput(label="Gildenname (exakt)", max_length=64, required=True)
     language = discord.ui.TextInput(
         label="Bot-Sprache",
@@ -38,8 +42,11 @@ class GuildSettingsModal(discord.ui.Modal, title="WoW-Gildenprofil (aktives Prof
         self.lang = lang
         self.region.label = tr_lang(lang, "Region", "Region")
         self.version.label = tr_lang(lang, "Version", "Version")
-        self.version.placeholder = tr_lang(lang, "retail oder mop_classic", "retail or mop_classic")
-        self.realm.label = tr_lang(lang, "Realm (Slug)", "Realm (slug)")
+        self.version.placeholder = tr_lang(lang, "retail, mop_classic oder forever", "retail, mop_classic or forever")
+        self.realm.label = tr_lang(lang, "Realm-Slug (leer bei WoW Forever)", "Realm slug (empty for WoW Forever)")
+        self.realm.placeholder = tr_lang(
+            lang, "tarren-mill (WoW Forever hat keine Realms)", "tarren-mill (WoW Forever has no realms)"
+        )
         self.guild_name.label = tr_lang(lang, "Gildenname (exakt)", "Guild name (exact)")
         self.language.label = tr_lang(lang, "Bot-Sprache", "Bot language")
         self.language.placeholder = tr_lang(lang, "de-DE oder en-US", "de-DE or en-US")
@@ -53,19 +60,33 @@ class GuildSettingsModal(discord.ui.Modal, title="WoW-Gildenprofil (aktives Prof
         version_key = str(self.version.value).lower().strip().replace("-", "_")
         if version_key in ("mop", "classic_mop"):
             version_key = "mop_classic"
+        elif is_forever(version_key):
+            version_key = GAME_FOREVER
+        if version_requires_realm(version_key) and not str(self.realm.value or "").strip():
+            glang = await self.cog._guild_lang(self.guild)
+            await interaction.response.send_message(
+                tr_lang(
+                    glang,
+                    "Realm fehlt. Nur WoW Forever (`forever`) kommt ohne Realm aus.",
+                    "Realm missing. Only WoW Forever (`forever`) works without a realm.",
+                ),
+                ephemeral=True,
+            )
+            return
         profile = {
             "region": str(self.region.value).lower().strip(),
             "version": version_key,
-            "realm": str(self.realm.value).strip(),
+            "realm": str(self.realm.value or "").strip(),
             "guild_name": str(self.guild_name.value).strip(),
         }
-        cfg = await self.cog._guild_config(self.guild)
-        cfg["language"] = lang
-        cfg.setdefault("wow_profiles", {})
-        cfg["wow_profiles"][version_key] = profile
-        cfg["wow"] = profile
-        cfg["active_profile_key"] = version_key
-        await self.cog.config.guild(self.guild).set(cfg)
+        async with self.cog._guild_cfg_lock(self.guild.id):
+            cfg = await self.cog._guild_config(self.guild)
+            cfg["language"] = lang
+            cfg.setdefault("wow_profiles", {})
+            cfg["wow_profiles"][version_key] = profile
+            cfg["wow"] = profile
+            cfg["active_profile_key"] = version_key
+            await self.cog.config.guild(self.guild).set(cfg)
         glang = await self.cog._guild_lang(self.guild)
         await interaction.response.send_message(
             tr_lang(glang, "Gildenprofil gespeichert.", "Guild profile saved."),
@@ -185,14 +206,15 @@ class SetRankTitleModal(discord.ui.Modal, title="Rangtitel (Index 0–9)"):
                 tr_lang(glang, "Index 0–9.", "Index 0–9."), ephemeral=True
             )
             return
-        cfg = await self.cog._guild_config(self.guild)
-        pk = cfg.get("active_profile_key", "retail") or "retail"
-        titles = cfg.get("rank_titles_by_profile", {}).get(pk, {})
-        if not isinstance(titles, dict):
-            titles = {}
-        titles[str(idx)] = str(self.title.value).strip()
-        cfg.setdefault("rank_titles_by_profile", {})[pk] = titles
-        await self.cog.config.guild(self.guild).set(cfg)
+        async with self.cog._guild_cfg_lock(self.guild.id):
+            cfg = await self.cog._guild_config(self.guild)
+            pk = cfg.get("active_profile_key", "retail") or "retail"
+            titles = cfg.get("rank_titles_by_profile", {}).get(pk, {})
+            if not isinstance(titles, dict):
+                titles = {}
+            titles[str(idx)] = str(self.title.value).strip()
+            cfg.setdefault("rank_titles_by_profile", {})[pk] = titles
+            await self.cog.config.guild(self.guild).set(cfg)
         await interaction.response.send_message(
             tr_lang(
                 glang,
@@ -232,14 +254,23 @@ class MapRankModal(discord.ui.Modal, title="Rang → Discord-Rolle"):
                 tr_lang(glang, "Rolle nicht gefunden.", "Role not found."), ephemeral=True
             )
             return
-        cfg = await self.cog._guild_config(self.guild)
-        pk = cfg.get("active_profile_key", "retail") or "retail"
-        m = cfg.get("rank_mapping_by_profile", {}).get(pk, {})
-        if not isinstance(m, dict):
-            m = {}
-        m[str(self.rank_name.value).strip()] = rid
-        cfg.setdefault("rank_mapping_by_profile", {})[pk] = m
-        await self.cog.config.guild(self.guild).set(cfg)
+        actor = interaction.user if isinstance(interaction.user, discord.Member) else None
+        rejected = self.cog._check_role_for_save(self.guild, actor, rid, glang)
+        if rejected:
+            await interaction.response.send_message(
+                tr_lang(glang, f"Rolle abgelehnt — {rejected}", f"Role rejected — {rejected}"),
+                ephemeral=True,
+            )
+            return
+        async with self.cog._guild_cfg_lock(self.guild.id):
+            cfg = await self.cog._guild_config(self.guild)
+            pk = cfg.get("active_profile_key", "retail") or "retail"
+            m = cfg.get("rank_mapping_by_profile", {}).get(pk, {})
+            if not isinstance(m, dict):
+                m = {}
+            m[str(self.rank_name.value).strip()] = rid
+            cfg.setdefault("rank_mapping_by_profile", {})[pk] = m
+            await self.cog.config.guild(self.guild).set(cfg)
         await interaction.response.send_message(
             tr_lang(
                 glang,
@@ -279,9 +310,10 @@ class SyncIntervalModal(discord.ui.Modal, title="Auto Rang-Sync Intervall"):
             return
         if m < 0:
             m = 0
-        cfg = await self.cog._guild_config(self.guild)
-        cfg["rank_sync_interval_minutes"] = m
-        await self.cog.config.guild(self.guild).set(cfg)
+        async with self.cog._guild_cfg_lock(self.guild.id):
+            cfg = await self.cog._guild_config(self.guild)
+            cfg["rank_sync_interval_minutes"] = m
+            await self.cog.config.guild(self.guild).set(cfg)
         await interaction.response.send_message(
             tr_lang(
                 glang,
@@ -346,18 +378,34 @@ class OnboardingSetupModal(discord.ui.Modal, title="Onboarding: Kanal & Rollen")
                 tr_lang(glang, "Ungültige IDs.", "Invalid IDs."), ephemeral=True
             )
             return
-        cfg = await self.cog._guild_config(self.guild)
-        channels = dict(cfg.get("channels") or {})
-        roles = dict(cfg.get("roles") or {})
-        if ch > 0:
-            channels["onboarding_channel_id"] = ch
-        if nr > 0:
-            roles["onboarding_new_role_id"] = nr
-        if cr > 0:
-            roles["onboarding_complete_role_id"] = cr
-        cfg["channels"] = channels
-        cfg["roles"] = roles
-        await self.cog.config.guild(self.guild).set(cfg)
+        actor = interaction.user if isinstance(interaction.user, discord.Member) else None
+        rejected = [
+            msg
+            for msg in (
+                self.cog._check_role_for_save(self.guild, actor, nr, glang) if nr > 0 else None,
+                self.cog._check_role_for_save(self.guild, actor, cr, glang) if cr > 0 else None,
+            )
+            if msg
+        ]
+        if rejected:
+            await interaction.response.send_message(
+                tr_lang(glang, "Rolle(n) abgelehnt — ", "Role(s) rejected — ") + "; ".join(rejected),
+                ephemeral=True,
+            )
+            return
+        async with self.cog._guild_cfg_lock(self.guild.id):
+            cfg = await self.cog._guild_config(self.guild)
+            channels = dict(cfg.get("channels") or {})
+            roles = dict(cfg.get("roles") or {})
+            if ch > 0:
+                channels["onboarding_channel_id"] = ch
+            if nr > 0:
+                roles["onboarding_new_role_id"] = nr
+            if cr > 0:
+                roles["onboarding_complete_role_id"] = cr
+            cfg["channels"] = channels
+            cfg["roles"] = roles
+            await self.cog.config.guild(self.guild).set(cfg)
         await self.cog._apply_onboarding_channel_permissions(self.guild)
         await interaction.response.send_message(
             tr_lang(
@@ -407,16 +455,26 @@ class AdminPickOneMemberView(discord.ui.View):
             return
         if self.mode == "simulate_join":
             await interaction.response.defer(ephemeral=True)
-            await self.cog._run_onboarding_flow(member, simulated=True)
-            await interaction.followup.send(
-                tr_lang(
-                    glang,
-                    f"Onboarding-Simulation für {member.mention} fertig.",
-                    f"Onboarding simulation for {member.mention} done.",
-                ),
-                ephemeral=True,
-            )
             self.stop()
+            await self.cog._run_onboarding_flow(member, simulated=True)
+            done = tr_lang(
+                glang,
+                f"Onboarding-Simulation für {member.mention} fertig.",
+                f"Onboarding simulation for {member.mention} done.",
+            )
+            try:
+                # Interaction tokens expire after 15 minutes; the onboarding may take longer.
+                await interaction.followup.send(done, ephemeral=True)
+            except discord.HTTPException:
+                channel = interaction.channel
+                if channel is not None:
+                    try:
+                        await channel.send(
+                            f"{self.officer.mention} {done}",
+                            allowed_mentions=discord.AllowedMentions(users=[self.officer]),
+                        )
+                    except discord.HTTPException:
+                        pass
             return
         if self.mode == "remove_registration":
             await self.cog.config.member(member).registration.clear()
@@ -468,25 +526,26 @@ class RankLockAddModal(discord.ui.Modal, title="Rank-Lock: Rang sperren"):
                 tr_lang(glang, "Leer.", "Empty."), ephemeral=True
             )
             return
-        cfg = await self.cog._guild_config(self.guild)
-        pk = str(cfg.get("active_profile_key") or "retail")
-        lr = dict(cfg.get("locked_rank_titles_by_profile") or {})
-        cur = lr.get(pk)
-        lines: List[str]
-        if cur is None:
-            lines = []
-        elif isinstance(cur, str):
-            lines = [cur]
-        elif isinstance(cur, (list, tuple)):
-            lines = [str(x).strip() for x in cur if str(x).strip()]
-        else:
-            lines = []
-        low = {x.lower() for x in lines}
-        if new_l.lower() not in low:
-            lines.append(new_l)
-        lr[pk] = lines
-        cfg["locked_rank_titles_by_profile"] = lr
-        await self.cog.config.guild(self.guild).set(cfg)
+        async with self.cog._guild_cfg_lock(self.guild.id):
+            cfg = await self.cog._guild_config(self.guild)
+            pk = str(cfg.get("active_profile_key") or "retail")
+            lr = dict(cfg.get("locked_rank_titles_by_profile") or {})
+            cur = lr.get(pk)
+            lines: List[str]
+            if cur is None:
+                lines = []
+            elif isinstance(cur, str):
+                lines = [cur]
+            elif isinstance(cur, (list, tuple)):
+                lines = [str(x).strip() for x in cur if str(x).strip()]
+            else:
+                lines = []
+            low = {x.lower() for x in lines}
+            if new_l.lower() not in low:
+                lines.append(new_l)
+            lr[pk] = lines
+            cfg["locked_rank_titles_by_profile"] = lr
+            await self.cog.config.guild(self.guild).set(cfg)
         await interaction.response.send_message(
             tr_lang(
                 glang,
@@ -499,7 +558,7 @@ class RankLockAddModal(discord.ui.Modal, title="Rank-Lock: Rang sperren"):
 
 class RankLockRemoveModal(discord.ui.Modal, title="Rank-Lock: Eintrag entfernen"):
     line = discord.ui.TextInput(
-        label="Exakt oder Teil des Eintrags (Groß/Klein egal)",
+        label="Exakt oder Teil (Groß/Klein egal)",
         placeholder="z.B. Kriegsfürst",
         max_length=64,
         required=True,
@@ -510,7 +569,7 @@ class RankLockRemoveModal(discord.ui.Modal, title="Rank-Lock: Eintrag entfernen"
         self.cog = cog
         self.guild = guild
         self.lang = lang
-        self.line.label = tr_lang(lang, "Exakt oder Teil des Eintrags (Groß/Klein egal)", "Exact or part of the entry (case-insensitive)")
+        self.line.label = tr_lang(lang, "Exakt oder Teil (Groß/Klein egal)", "Exact or part of entry (case-insensitive)")
         self.line.placeholder = tr_lang(lang, "z.B. Kriegsfürst", "e.g. Warlord")
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -523,19 +582,24 @@ class RankLockRemoveModal(discord.ui.Modal, title="Rank-Lock: Eintrag entfernen"
                 tr_lang(glang, "Leer.", "Empty."), ephemeral=True
             )
             return
-        cfg = await self.cog._guild_config(self.guild)
-        pk = str(cfg.get("active_profile_key") or "retail")
-        lr = dict(cfg.get("locked_rank_titles_by_profile") or {})
-        cur = lr.get(pk)
-        if isinstance(cur, str):
-            lines = [cur] if cur.strip() else []
-        elif isinstance(cur, (list, tuple)):
-            lines = [str(x).strip() for x in cur if str(x).strip()]
-        else:
-            lines = []
-        before = len(lines)
-        lines = [x for x in lines if needle not in x.lower()]
-        removed = before - len(lines)
+        async with self.cog._guild_cfg_lock(self.guild.id):
+            cfg = await self.cog._guild_config(self.guild)
+            pk = str(cfg.get("active_profile_key") or "retail")
+            lr = dict(cfg.get("locked_rank_titles_by_profile") or {})
+            cur = lr.get(pk)
+            if isinstance(cur, str):
+                lines = [cur] if cur.strip() else []
+            elif isinstance(cur, (list, tuple)):
+                lines = [str(x).strip() for x in cur if str(x).strip()]
+            else:
+                lines = []
+            before = len(lines)
+            lines = [x for x in lines if needle not in x.lower()]
+            removed = before - len(lines)
+            if removed:
+                lr[pk] = lines
+                cfg["locked_rank_titles_by_profile"] = lr
+                await self.cog.config.guild(self.guild).set(cfg)
         if removed == 0:
             await interaction.response.send_message(
                 tr_lang(
@@ -546,9 +610,6 @@ class RankLockRemoveModal(discord.ui.Modal, title="Rank-Lock: Eintrag entfernen"
                 ephemeral=True,
             )
             return
-        lr[pk] = lines
-        cfg["locked_rank_titles_by_profile"] = lr
-        await self.cog.config.guild(self.guild).set(cfg)
         await interaction.response.send_message(
             tr_lang(
                 glang,

@@ -1,0 +1,34 @@
+{
+    "name": "WoWToolsForever",
+    "author": [
+        "Karlo",
+        "Domekologe"
+    ],
+    "description": "FOREVER version of WoWTools. Cog for interacting with the World of Warcraft: Forever APIs (Blizzard, realmless: characters are looked up by region + first name + surname, guilds by region + guild name). Loads alongside the retail (wowt-) and classic (wowtc-) WoWTools cogs; all commands are prefixed with wowtf-. Features without WoW Forever support (Raider.IO, Mythic+ scoreboard, PvP ratings) answer with a notice instead.",
+    "short": "FOREVER version of WoWTools for World of Warcraft: Forever.",
+    "install_msg": "Make sure you check out `[p]help wowtf-serverset` and `[p]help wowtf-wowset` after loading this cog and set your region (and guild) as some commands won't work otherwise.\n\nThis cog queries the Blizzard API (WoW Forever namespaces) and needs Blizzard API credentials: `[p]set api blizzard client_id,<id> client_secret,<secret>`.\nNote: WoW Forever characters only appear in the API from level 10 and after logging out.",
+    "tags": [
+        "warcraft",
+        "world of warcraft",
+        "wow forever"
+    ],
+    "requirements": [
+        "tabulate",
+        "aiolimiter",
+        "Pillow",
+        "dictdiffer",
+        "rapidfuzz",
+        "beautifulsoup4"
+    ],
+    "min_bot_version": "3.5.3.dev0",
+    "max_bot_version": "3.6.0.dev0",
+    "type": "COG",
+    "end_user_data_statement": "This cog can store the first name, surname and region of a Discord user's World of Warcraft: Forever character. This data is used to fetch information about the character from the Blizzard API.",
+    "min_python_version": [
+        3,
+        10,
+        0
+    ],
+    "hidden": false,
+    "disabled": false
+}

@@ -16,6 +16,9 @@ from redbot.core.utils.chat_formatting import humanize_list
 
 from .user_installable.cvardocs import CVar, CVarDocs
 
+from .autocomplete import GAME
+from .blizzard_rest import reset_token_caches
+
 from .guildmanage import GuildManage
 from .on_message import OnMessage
 from .pvp import PvP
@@ -48,6 +51,13 @@ from .pdc_dashboard import (
 
 log = logging.getLogger("red.karlo-cogs.wowtools")
 _ = Translator("WoWTools", __file__)
+
+# Names of the voice channels created by `serverset patchcountdown` start with one of
+# these. Only such channels are ever renamed or deleted by the countdown logic.
+_COUNTDOWN_PREFIXES = ("🔴", "🟡")
+
+# Sister cogs that answer [[...]] messages as well (see serverset onmessage).
+_WOWTOOLS_COG_NAMES = ("WoWTools", "WoWToolsClassic", "WoWToolsForever")
 
 try:
     from pdc_dashboard.rpc.third_parties import dashboard_page as _dashboard_page  # type: ignore
@@ -136,16 +146,21 @@ class WoWToolsClassic(
         self.blizzard: dict[str, WowApi] = {}
         self.cvar_cache: list[CVar] = []
         self.roster_cache: dict[int, dict] = {}
-        self.update_dungeon_scoreboard.start()
-        log.info("Dungeon scoreboard updater started.")
+        if GAME == "retail":
+            # The Mythic+ scoreboard needs raider.io Mythic+ data (not available for
+            # MoP Classic), and the bot status is only set by the retail cog so that
+            # retail and classic do not overwrite each other's presence.
+            self.update_dungeon_scoreboard.start()
+            log.info("Dungeon scoreboard updater started.")
         self.guild_log.start()
         log.info("Guild log updater started.")
         self.update_countdown_channels.start()
         log.info("Countdown channel updater started.")
-        self.update_bot_status.start()
-        log.info("Bot status updater started.")
+        if GAME == "retail":
+            self.update_bot_status.start()
+            log.info("Bot status updater started.")
 
-        self.current_raid = "manaforge-omega"
+        # The current raid is resolved dynamically (Raiderio.get_current_raid).
         self._dashboard_attached = False
 
         # For countdown channels
@@ -168,7 +183,7 @@ class WoWToolsClassic(
 
     async def cog_load(self) -> None:
         raiderio_api_key = await self.bot.get_shared_api_tokens("raiderio")
-        self.raiderio_api = RaiderIO(api_key=raiderio_api_key.get("api_key"))
+        await self._replace_raiderio_api(raiderio_api_key.get("api_key"))
         await self.create_bnet_objs()
         dashboard = self.bot.get_cog("pdc_webdashboard") or self.bot.get_cog("WebDashboard") or self.bot.get_cog("Dashboard")
         if dashboard is not None:
@@ -178,6 +193,50 @@ class WoWToolsClassic(
             except Exception:
                 self._dashboard_attached = False
         register_dashboard(self)
+
+    async def _replace_raiderio_api(self, api_key: Optional[str]) -> None:
+        """Swap the raider.io client and close the CachedSession of the old one."""
+        old = getattr(self, "raiderio_api", None)
+        self.raiderio_api = RaiderIO(api_key=api_key or None)
+        await self._close_raiderio_api(old)
+
+    @staticmethod
+    async def _close_raiderio_api(api: Optional[RaiderIO]) -> None:
+        session = getattr(api, "session", None)
+        if session is None:
+            return
+        try:
+            await session.close()
+        except Exception as e:
+            log.debug("Closing the raider.io session failed: %s", e)
+
+    async def _other_on_message_cogs(self, guild: discord.Guild) -> list[str]:
+        """Names of sister WoWTools cogs that already answer [[...]] in ``guild``."""
+        active = []
+        for name in _WOWTOOLS_COG_NAMES:
+            cog = self.bot.get_cog(name)
+            if cog is None or cog is self or not hasattr(cog, "config"):
+                continue
+            try:
+                if await cog.config.guild(guild).on_message():
+                    active.append(name)
+            except Exception:
+                continue
+        return active
+
+    async def _on_message_overlap_hint(self, guild: discord.Guild) -> str:
+        others = await self._other_on_message_cogs(guild)
+        if not others:
+            return ""
+        lang = await self.config.guild(guild).language()
+        names = ", ".join(others)
+        return tr_lang(
+            lang,
+            f"Hinweis: {names} beantwortet [[...]] auf diesem Server bereits - "
+            "es kann doppelte Antworten geben.",
+            f"Note: {names} already answers [[...]] on this server - "
+            "replies may be duplicated.",
+        )
 
     async def create_bnet_objs(self):
         blizzard_api = await self.bot.get_shared_api_tokens("blizzard")
@@ -345,7 +404,10 @@ class WoWToolsClassic(
             await ctx.send(_("On message disabled."))
         else:
             await self.config.guild(ctx.guild).on_message.set(True)
-            await ctx.send(_("On message enabled."))
+            msg = _("On message enabled.")
+            if hint := await self._on_message_overlap_hint(ctx.guild):
+                msg += "\n" + hint
+            await ctx.send(msg)
 
     @wowset.command(name="assintegration")
     @commands.is_owner()
@@ -366,9 +428,11 @@ class WoWToolsClassic(
         "Add or remove a locked channel that will display the time until the next patch releases."
         cd_channel_id = await self.config.guild(ctx.guild).countdown_channel()
         region = await self.config.guild(ctx.guild).region()  # type: ignore
+        lang = await self.config.guild(ctx.guild).language()
         if cd_channel_id:
             cd_channel = ctx.guild.get_channel(cd_channel_id)
-            if cd_channel:
+            # Never delete a channel this command did not create.
+            if self._is_countdown_channel(cd_channel):
                 await cd_channel.delete(
                     reason=_(
                         "User with ID {cmd_author} requested deletion of countdown channel."
@@ -391,7 +455,14 @@ class WoWToolsClassic(
             diff = release_time - now
             early_access = False
         if diff.total_seconds() < 0:
-            await ctx.send(_("New season has already released."))
+            # All configured dates are in the past -> do not create a channel.
+            await ctx.send(
+                tr_lang(
+                    lang,
+                    "Kein aktueller Termin hinterlegt.",
+                    "No upcoming date configured.",
+                )
+            )
             return
 
         days = diff.days
@@ -417,6 +488,13 @@ class WoWToolsClassic(
         await self.config.guild(ctx.guild).countdown_channel.set(channel.id)
         await ctx.tick()
 
+    @staticmethod
+    def _is_countdown_channel(channel) -> bool:
+        """True only for voice channels created by `serverset patchcountdown`."""
+        return isinstance(channel, discord.VoiceChannel) and channel.name.startswith(
+            _COUNTDOWN_PREFIXES
+        )
+
     @tasks.loop(minutes=6)
     async def update_countdown_channels(self):
         for guild in self.bot.guilds:
@@ -430,6 +508,15 @@ class WoWToolsClassic(
 
             countdown_channel = guild.get_channel(countdown_channel_id)
             if not countdown_channel:
+                continue
+            if not self._is_countdown_channel(countdown_channel):
+                # Not a channel created by patchcountdown (e.g. an old dashboard
+                # setting pointing at a text channel): never rename/delete it.
+                log.warning(
+                    "Countdown setting in guild %s points to a non-countdown channel; clearing it.",
+                    guild.id,
+                )
+                await self.config.guild(guild).countdown_channel.clear()
                 continue
 
             now = datetime.datetime.now(datetime.UTC)
@@ -490,6 +577,15 @@ class WoWToolsClassic(
         emoji: Optional[discord.Emoji] = None,
     ):
         """Set the guild whose raid progression is shown as the bot's status."""
+        if GAME != "retail":
+            await ctx.send(
+                tr_lang(
+                    await self.config.guild(ctx.guild).language() if ctx.guild else "en-US",
+                    "Der Bot-Status wird nur vom Retail-Cog (WoWTools) gesetzt.",
+                    "The bot status is only set by the retail cog (WoWTools).",
+                )
+            )
+            return
         status_guild = [
             guild_name.replace("-", " ").lower(),
             realm,
@@ -503,11 +599,18 @@ class WoWToolsClassic(
         await ctx.send(_("Setting guild bot status failed."))
 
     async def set_bot_status(self) -> bool:
+        if GAME != "retail":
+            # Only the retail cog sets the bot's presence.
+            return False
         try:
             guild, realm, region, emoji = await self.config.status_guild()
         except ValueError:
             return False
 
+        current_raid = await self.get_current_raid(region)
+        if not current_raid:
+            log.debug("Current raid unknown (raider.io static data); bot status not updated.")
+            return False
         guild_data = await self.raiderio_api.get_guild_profile(
             region,
             realm,
@@ -516,8 +619,8 @@ class WoWToolsClassic(
         )
         try:
             guild: str = guild_data["name"]
-            progress: str = guild_data["raid_progression"][self.current_raid]["summary"]
-        except KeyError:
+            progress: str = guild_data["raid_progression"][current_raid]["summary"]
+        except (KeyError, TypeError):
             return False
         activity = discord.CustomActivity(name=f"{guild}: {progress}", emoji=emoji)
         await self.bot.change_presence(activity=activity)
@@ -545,6 +648,8 @@ class WoWToolsClassic(
         """
         if service_name != "blizzard":
             return
+        # New credentials -> every cached OAuth token is stale.
+        reset_token_caches(self)
         await self.create_bnet_objs()
 
     @dashboard_widget("wowtools_onmessage", "WoW Auto-Reply", size="sm", permission="guild_member")
@@ -583,7 +688,6 @@ class WoWToolsClassic(
                 Field.text("real_guild_name", "Guild name (actual)", value=str(await g.real_guild_name() or "")),
                 Field.select("guild_log_channel", "Log channel", ch_opts, value=str(await g.guild_log_channel() or "")),
                 Field.select("scoreboard_channel", "Scoreboard channel", ch_opts, value=str(await g.scoreboard_channel() or "")),
-                Field.select("countdown_channel", "Countdown channel", ch_opts, value=str(await g.countdown_channel() or "")),
                 Field.textarea("welcome_note", "Welcome text", value=str(dt.get("welcome_note", "")), variables=text_vars),
                 Field.textarea("status_note", "Status text", value=str(dt.get("status_note", "")), variables=text_vars),
             ]
@@ -592,8 +696,12 @@ class WoWToolsClassic(
     @wowtools_guild_panel.on_submit
     async def _save_wowtools_guild(self, ctx, data):
         g = self.config.guild(ctx.guild)
+        hint = ""
         if "on_message" in data:
-            await g.on_message.set(bool(data["on_message"]))
+            enable = bool(data["on_message"])
+            if enable and not await g.on_message():
+                hint = await self._on_message_overlap_hint(ctx.guild)
+            await g.on_message.set(enable)
         if "region" in data:
             v = str(data["region"]).lower().strip()
             await g.region.set(v if v in ("eu", "us", "kr") else None)
@@ -618,10 +726,8 @@ class WoWToolsClassic(
         if "scoreboard_channel" in data:
             v = data["scoreboard_channel"]
             await g.scoreboard_channel.set(int(v) if v else None)
-        if "countdown_channel" in data:
-            v = data["countdown_channel"]
-            await g.countdown_channel.set(int(v) if v else None)
-        return SubmitResult.ok(tr(ctx, "Gespeichert.", "Saved."))
+        saved = tr(ctx, "Gespeichert.", "Saved.")
+        return SubmitResult.ok(f"{saved} {hint}".strip())
 
     @dashboard_panel("language", L("Sprache", "Language"), mount="guild_settings", permission="guild_admin", order=99)
     async def language_panel(self, ctx):
@@ -664,9 +770,10 @@ class WoWToolsClassic(
         await self.bot.set_shared_api_tokens(
             "raiderio", api_key=str(data.get("raiderio_api_key", "")).strip()
         )
+        reset_token_caches(self)
         try:
             await self.create_bnet_objs()
-            self.raiderio_api = RaiderIO(api_key=str(data.get("raiderio_api_key", "")).strip())
+            await self._replace_raiderio_api(str(data.get("raiderio_api_key", "")).strip())
         except Exception:
             pass
         return SubmitResult.ok(tr(ctx, "API-Tokens gespeichert.", "API tokens saved."))
@@ -699,6 +806,7 @@ class WoWToolsClassic(
     async def cog_unload(self):
         unregister_dashboard(self)
         self.bot.loop.create_task(self.session.close())
+        self.bot.loop.create_task(self._close_raiderio_api(self.raiderio_api))
         self.update_dungeon_scoreboard.cancel()
         self.guild_log.cancel()
         self.update_countdown_channels.cancel()

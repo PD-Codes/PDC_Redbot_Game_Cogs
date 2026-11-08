@@ -3,6 +3,9 @@
   "onboarding.ask_mainchar": "Please send your main character name.",
   "onboarding.rules": "Please read the server rules and confirm with the required emoji.",
   "verification.manual_required": "Manual verification required for {username} as {charname}.",
-  "command.saved": "Saved successfully."
+  "command.saved": "Saved successfully.",
+  "game.forever": "WoW Forever",
+  "onboarding.ask_mainchar_forever": "WoW Forever: please send your main character's first name and surname (e.g. `Anna Skyfeather`).",
+  "setup.forever_no_realm": "WoW Forever has no realms – leave the realm field empty."
 }
 

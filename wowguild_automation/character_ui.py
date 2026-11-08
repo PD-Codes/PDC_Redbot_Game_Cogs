@@ -1,18 +1,21 @@
-"""Interactive discord.ui flows for linking guild roster characters (Retail / MoP Classic)."""
+"""Interactive discord.ui flows for linking guild roster characters (Retail / MoP Classic / WoW Forever)."""
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple
 
 import discord
 
 from .pdc_dashboard import tr_lang
 from .character_helpers import (
+    GAME_FOREVER,
     GAME_MOP,
     GAME_RETAIL,
     SUPPORTED_GAMES,
+    char_display_name,
     char_tuple_key,
+    entry_key,
+    profile_is_complete,
     clear_main_for_game,
     game_label,
     get_linked_list,
@@ -180,7 +183,22 @@ class CharMainMenuView(discord.ui.View):
                 view=_menu_view(self.cog, self.guild, self.member, actor=self.actor, lang=glang),
             )
             return
-        ordered = sorted(linked, key=lambda e: (e["game_type"], e["name"].lower()))
+        ordered = sorted(linked, key=lambda e: (e["game_type"], char_display_name(e).lower()))
+        if self.actor.id != self.member.id:
+            # Officer editing another member: remove from the target, with a reason (DM to the user).
+            nv = LinkedRemovePageView(
+                self.cog,
+                self.guild,
+                self.actor,
+                ordered,
+                page=0,
+                officer_mode=True,
+                officer=self.actor,
+                target=self.member,
+                lang=glang,
+            )
+            await interaction.response.edit_message(content=nv._caption(glang), view=nv)
+            return
         await interaction.response.edit_message(
             content=self._remove_caption(ordered, 0, glang),
             view=LinkedRemovePageView(
@@ -243,24 +261,30 @@ class GamePickView(discord.ui.View):
     async def mop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._open_roster(interaction, GAME_MOP)
 
+    @discord.ui.button(label="WoW Forever", style=discord.ButtonStyle.primary, row=0)
+    async def forever(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._open_roster(interaction, GAME_FOREVER)
+
     async def _open_roster(self, interaction: discord.Interaction, game: str) -> None:
         glang = await self.cog._guild_lang(self.guild)
         if interaction.user.id != self.actor.id:
             await interaction.response.send_message(tr_lang(glang, "Nur für dich.", "Only for you."), ephemeral=True)
             return
+        # Acknowledge first: the roster API call can exceed Discord's 3 s response window.
+        await interaction.response.defer()
         cfg = await self.cog._guild_config(self.guild)
         prof = await wow_profile_for_game(cfg, game)
-        if not prof or not prof.get("realm") or not prof.get("guild_name"):
-            await interaction.response.edit_message(
+        if not profile_is_complete(prof):
+            await interaction.edit_original_response(
                 content=tr_lang(
                     glang,
                     (
                         f"Für **{game_label(game)}** fehlen Realm/Gildenname im Server-Setup "
-                        "(Web-Dashboard / `wow guildsettings`)."
+                        "(Web-Dashboard / `wow guildsettings`; WoW Forever braucht keinen Realm)."
                     ),
                     (
                         f"Realm/guild name missing for **{game_label(game)}** in the server setup "
-                        "(web dashboard / `wow guildsettings`)."
+                        "(web dashboard / `wow guildsettings`; WoW Forever needs no realm)."
                     ),
                 ),
                 view=_menu_view(self.cog, self.guild, self.member, actor=self.actor, lang=glang),
@@ -273,13 +297,13 @@ class GamePickView(discord.ui.View):
             prof.get("guild_name", ""),
         )
         if not names:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=tr_lang(glang, "Gildenroster leer oder API-Fehler. Prüfe Client-ID/Secret und Profil.", "Guild roster empty or API error. Check client ID/secret and profile."),
                 view=_menu_view(self.cog, self.guild, self.member, actor=self.actor, lang=glang),
             )
             return
         total_pages = max(1, (len(names) + LINKED_PAGE_SIZE - 1) // LINKED_PAGE_SIZE)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=tr_lang(
                 glang,
                 (
@@ -442,9 +466,11 @@ class RosterPageView(discord.ui.View):
         if not selected:
             await interaction.response.send_message(tr_lang(glang, "Nichts gewählt.", "Nothing selected."), ephemeral=True)
             return
+        # Acknowledge first: linking re-reads the guild roster from the API.
+        await interaction.response.defer()
         msg, ok = await cog._try_add_characters_for_member(guild, member, game_type, list(selected))
         view.stop()
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"{msg}\n\n{_panel_intro(glang)}",
             view=_menu_view(cog, guild, member, actor=actor, lang=glang),
         )
@@ -487,6 +513,10 @@ class MainGamePickView(discord.ui.View):
     async def mop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._open(interaction, GAME_MOP)
 
+    @discord.ui.button(label="WoW Forever", style=discord.ButtonStyle.primary, row=0)
+    async def forever(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._open(interaction, GAME_FOREVER)
+
     async def _open(self, interaction: discord.Interaction, game: str) -> None:
         glang = await self.cog._guild_lang(self.guild)
         if interaction.user.id != self.actor.id:
@@ -500,7 +530,7 @@ class MainGamePickView(discord.ui.View):
                 view=_menu_view(self.cog, self.guild, self.member, actor=self.actor, lang=glang),
             )
             return
-        ordered = sorted(subset, key=lambda e: e["name"].lower())
+        ordered = sorted(subset, key=lambda e: char_display_name(e).lower())
         tp = max(1, (len(ordered) + LINKED_PAGE_SIZE - 1) // LINKED_PAGE_SIZE)
         await interaction.response.edit_message(
             content=tr_lang(
@@ -548,8 +578,8 @@ class LinkedMainPageView(discord.ui.View):
         opts: List[discord.SelectOption] = []
         for i, e in enumerate(chunk[:25]):
             tok = f"m{self.page}_{i}"
-            self._main_pick_map[tok] = (e["name"], e["game_type"])
-            label = f"{e['name']}"[:100]
+            self._main_pick_map[tok] = (char_display_name(e), e["game_type"])
+            label = f"{char_display_name(e)}"[:100]
             opts.append(discord.SelectOption(label=label, value=tok))
         if opts:
             s = discord.ui.Select(placeholder=tr_lang(self.lang, "Main-Char wählen", "Pick main character"), min_values=1, max_values=1, options=opts)
@@ -633,9 +663,10 @@ class LinkedMainPageView(discord.ui.View):
         name, game = pair[0], pair[1]
         if game not in SUPPORTED_GAMES:
             game = GAME_RETAIL
-        await set_main_for_game(self.cog.config.member(self.member), game, name.strip())
-        await self.cog.config.member(self.member).selected_game.set(game)
-        asyncio.create_task(
+        async with self.cog._member_lock(self.guild.id, self.member.id):
+            await set_main_for_game(self.cog.config.member(self.member), game, name.strip())
+            await self.cog.config.member(self.member).selected_game.set(game)
+        self.cog._spawn(
             self.cog._schedule_rank_sync_after_main(self.guild, self.member, game, name.strip())
         )
         self.stop()
@@ -684,7 +715,7 @@ class MainCharSearchModal(discord.ui.Modal, title="Charakter suchen"):
             return
         q = str(self.query.value).strip().lower()
         linked = await get_linked_list(self.cog.config.member(self.member))
-        subset = [e for e in linked if e["game_type"] == self.game_type and q in e["name"].lower()]
+        subset = [e for e in linked if e["game_type"] == self.game_type and q in char_display_name(e).lower()]
         if not subset:
             await interaction.response.edit_message(
                 content=tr_lang(
@@ -697,23 +728,26 @@ class MainCharSearchModal(discord.ui.Modal, title="Charakter suchen"):
             return
         if len(subset) == 1:
             e = subset[0]
-            await set_main_for_game(self.cog.config.member(self.member), e["game_type"], e["name"])
-            await self.cog.config.member(self.member).selected_game.set(e["game_type"])
-            asyncio.create_task(
+            async with self.cog._member_lock(self.guild.id, self.member.id):
+                await set_main_for_game(
+                    self.cog.config.member(self.member), e["game_type"], e["name"], e.get("surname", "")
+                )
+                await self.cog.config.member(self.member).selected_game.set(e["game_type"])
+            self.cog._spawn(
                 self.cog._schedule_rank_sync_after_main(
-                    self.guild, self.member, e["game_type"], e["name"]
+                    self.guild, self.member, e["game_type"], char_display_name(e)
                 )
             )
             await interaction.response.edit_message(
                 content=tr_lang(
                     glang,
-                    f"Main **{game_label(e['game_type'])}** gesetzt: **{e['name']}**.\n\n{_panel_intro(glang)}",
-                    f"Main **{game_label(e['game_type'])}** set: **{e['name']}**.\n\n{_panel_intro(glang)}",
+                    f"Main **{game_label(e['game_type'])}** gesetzt: **{char_display_name(e)}**.\n\n{_panel_intro(glang)}",
+                    f"Main **{game_label(e['game_type'])}** set: **{char_display_name(e)}**.\n\n{_panel_intro(glang)}",
                 ),
                 view=_menu_view(self.cog, self.guild, self.member, actor=self.actor, lang=glang),
             )
             return
-        ordered = sorted(subset, key=lambda e: e["name"].lower())[:25]
+        ordered = sorted(subset, key=lambda e: char_display_name(e).lower())[:25]
         view = MainSearchDisambigView(self.cog, self.guild, self.member, ordered, actor=self.actor, lang=glang)
         await interaction.response.edit_message(
             content=tr_lang(glang, "Mehrere Treffer — bitte einen wählen:", "Multiple matches — please pick one:"),
@@ -742,8 +776,8 @@ class MainSearchDisambigView(discord.ui.View):
         opts: List[discord.SelectOption] = []
         for i, e in enumerate(entries[:25]):
             tok = f"d{i}"
-            self._pick_map[tok] = (e["name"], e["game_type"])
-            opts.append(discord.SelectOption(label=e["name"][:100], value=tok))
+            self._pick_map[tok] = (char_display_name(e), e["game_type"])
+            opts.append(discord.SelectOption(label=char_display_name(e)[:100], value=tok))
         s = discord.ui.Select(placeholder=tr_lang(self.lang, "Main wählen", "Pick main"), min_values=1, max_values=1, options=opts)
         s.callback = self._pick
         self.add_item(s)
@@ -774,9 +808,10 @@ class MainSearchDisambigView(discord.ui.View):
         name, game = pair[0], pair[1]
         if game not in SUPPORTED_GAMES:
             game = GAME_RETAIL
-        await set_main_for_game(self.cog.config.member(self.member), game, name.strip())
-        await self.cog.config.member(self.member).selected_game.set(game)
-        asyncio.create_task(
+        async with self.cog._member_lock(self.guild.id, self.member.id):
+            await set_main_for_game(self.cog.config.member(self.member), game, name.strip())
+            await self.cog.config.member(self.member).selected_game.set(game)
+        self.cog._spawn(
             self.cog._schedule_rank_sync_after_main(self.guild, self.member, game, name.strip())
         )
         await interaction.response.edit_message(
@@ -823,8 +858,8 @@ class LinkedRemovePageView(discord.ui.View):
         opts: List[discord.SelectOption] = []
         for i, e in enumerate(chunk[:25]):
             tok = f"rm{self.page}_{i}"
-            self._remove_token_map[tok] = (e["name"], e["game_type"])
-            label = f"{e['name']} ({game_label(e['game_type'])})"[:100]
+            self._remove_token_map[tok] = (char_display_name(e), e["game_type"])
+            label = f"{char_display_name(e)} ({game_label(e['game_type'])})"[:100]
             opts.append(discord.SelectOption(label=label, value=tok))
         if opts:
             s = discord.ui.Select(
@@ -979,15 +1014,16 @@ class LinkedRemovePageView(discord.ui.View):
 
     async def _apply_self_removal(self, interaction: discord.Interaction) -> None:
         glang = await self.cog._guild_lang(self.guild)
-        keys = {(n.lower(), g.lower()) for n, g in self.accumulated}
-        linked = await get_linked_list(self.cog.config.member(self.actor))
-        new_list = [x for x in linked if (x["name"].lower(), x["game_type"].lower()) not in keys]
-        await set_linked_list(self.cog.config.member(self.actor), new_list)
-        for n, g in list(self.accumulated):
-            m = await get_main_characters(self.cog.config.member(self.actor))
-            cur = m.get(g)
-            if cur and char_tuple_key(cur["name"], g) == char_tuple_key(n, g):
-                await clear_main_for_game(self.cog.config.member(self.actor), g)
+        keys = {char_tuple_key(n, g.lower()) for n, g in self.accumulated}
+        async with self.cog._member_lock(self.guild.id, self.actor.id):
+            linked = await get_linked_list(self.cog.config.member(self.actor))
+            new_list = [x for x in linked if entry_key(x) not in keys]
+            await set_linked_list(self.cog.config.member(self.actor), new_list)
+            for n, g in list(self.accumulated):
+                m = await get_main_characters(self.cog.config.member(self.actor))
+                cur = m.get(g)
+                if cur and char_tuple_key(cur["name"], g, cur.get("surname", "")) == char_tuple_key(n, g):
+                    await clear_main_for_game(self.cog.config.member(self.actor), g)
         self.accumulated.clear()
         linked2 = await get_linked_list(self.cog.config.member(self.actor))
         if not linked2:
@@ -1000,7 +1036,7 @@ class LinkedRemovePageView(discord.ui.View):
                 view=_menu_view(self.cog, self.guild, self.actor, actor=self.actor, lang=glang),
             )
             return
-        ordered = sorted(linked2, key=lambda e: (e["game_type"], e["name"].lower()))
+        ordered = sorted(linked2, key=lambda e: (e["game_type"], char_display_name(e).lower()))
         new_page = min(self.page, max(0, (len(ordered) - 1) // LINKED_PAGE_SIZE))
         await interaction.response.edit_message(
             content=CharMainMenuView._remove_caption(ordered, new_page, glang),
@@ -1056,16 +1092,17 @@ class OfficerRemoveReasonModal(discord.ui.Modal, title="Begründung"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         glang = await self.cog._guild_lang(self.guild)
         reason = str(self.reason.value).strip()
-        linked = await get_linked_list(self.cog.config.member(self.target))
-        rset = {(n.lower(), g.lower()) for n, g in self.to_remove}
-        new_list = [x for x in linked if (x["name"].lower(), x["game_type"].lower()) not in rset]
+        rset = {char_tuple_key(n, g.lower()) for n, g in self.to_remove}
         removed_labels = [f"{n} ({game_label(g)})" for n, g in self.to_remove]
-        await set_linked_list(self.cog.config.member(self.target), new_list)
-        for n, g in self.to_remove:
-            m = await get_main_characters(self.cog.config.member(self.target))
-            cur = m.get(g)
-            if cur and char_tuple_key(cur["name"], g) == char_tuple_key(n, g):
-                await clear_main_for_game(self.cog.config.member(self.target), g)
+        async with self.cog._member_lock(self.guild.id, self.target.id):
+            linked = await get_linked_list(self.cog.config.member(self.target))
+            new_list = [x for x in linked if entry_key(x) not in rset]
+            await set_linked_list(self.cog.config.member(self.target), new_list)
+            for n, g in self.to_remove:
+                m = await get_main_characters(self.cog.config.member(self.target))
+                cur = m.get(g)
+                if cur and char_tuple_key(cur["name"], g, cur.get("surname", "")) == char_tuple_key(n, g):
+                    await clear_main_for_game(self.cog.config.member(self.target), g)
         cfg = await self.cog.config.guild(self.guild).all()
         templates = cfg.get("templates", {})
         dm_t = templates.get(

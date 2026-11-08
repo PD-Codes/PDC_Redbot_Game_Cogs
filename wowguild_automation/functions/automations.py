@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, FrozenSet, List, Optional, Set, Tuple
 
 import discord
 
-from .blizzard import BlizzardService
+from .blizzard import BlizzardService, _is_forever
+
+_RANK_N_RE = re.compile(r"^rank\s*(\d+)$")
+
+
+def _norm_rank_text(value: Any) -> str:
+    """Case-insensitive, trimmed, inner whitespace collapsed."""
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
 
 
 def _normalize_rank_entry_list(entries_raw: Any) -> Set[str]:
@@ -15,7 +23,41 @@ def _normalize_rank_entry_list(entries_raw: Any) -> Set[str]:
         entries_raw = [entries_raw]
     if not isinstance(entries_raw, (list, tuple, set)):
         return set()
-    return {str(e).strip().lower() for e in entries_raw if str(e).strip()}
+    out: Set[str] = set()
+    for e in entries_raw:
+        n = _norm_rank_text(e)
+        if not n:
+            continue
+        out.add(n)
+        m = _RANK_N_RE.match(n)
+        if m:
+            # "Rank 3" / "rank3" also match by bare index "3".
+            out.add(str(int(m.group(1))))
+            out.add(f"rank {int(m.group(1))}")
+        elif n.isdigit():
+            out.add(str(int(n)))
+            out.add(f"rank {int(n)}")
+    return out
+
+
+def _profile_is_forever(guild_config: dict, profile_key: str) -> bool:
+    prof = (guild_config.get("wow_profiles") or {}).get(profile_key)
+    if not isinstance(prof, dict) or not prof:
+        prof = guild_config.get("wow") or {}
+    version = prof.get("version", "") if isinstance(prof, dict) else ""
+    return _is_forever(version) or (not version and _is_forever(profile_key))
+
+
+def _rank_mapping_for_profile(guild_config: dict, profile_key: str) -> dict:
+    """Per-profile rank mapping; the legacy global mapping is a fallback for retail/MoP only."""
+    by_profile = guild_config.get("rank_mapping_by_profile", {}) or {}
+    m = by_profile.get(profile_key)
+    if m:
+        return m if isinstance(m, dict) else {}
+    if _profile_is_forever(guild_config, profile_key):
+        return {}
+    legacy = guild_config.get("rank_mapping", {}) or {}
+    return legacy if isinstance(legacy, dict) else {}
 
 
 def _rank_matches_normalized_entries(
@@ -28,12 +70,12 @@ def _rank_matches_normalized_entries(
         return False
     candidates: List[str] = []
     if rank_title:
-        rt = str(rank_title).strip().lower()
+        rt = _norm_rank_text(rank_title)
         candidates.append(rt)
         if rt.startswith("rank "):
             candidates.append(rt.replace("rank ", "", 1).strip())
     if api_rank_name:
-        an = str(api_rank_name).strip().lower()
+        an = _norm_rank_text(api_rank_name)
         candidates.append(an)
         if an.startswith("rank "):
             candidates.append(an.replace("rank ", "", 1).strip())
@@ -60,8 +102,7 @@ class RankSyncService:
         self.blizzard = blizzard
 
     def mapped_role_ids_for_profile(self, guild_config: dict, profile_key: str) -> Set[int]:
-        rank_mapping_by_profile = guild_config.get("rank_mapping_by_profile", {})
-        m = rank_mapping_by_profile.get(profile_key) or guild_config.get("rank_mapping", {})
+        m = _rank_mapping_for_profile(guild_config, profile_key)
         out: Set[int] = set()
         for v in m.values():
             try:
@@ -152,8 +193,7 @@ class RankSyncService:
                 skip_reason="protected",
             )
 
-        rank_mapping_by_profile = guild_config.get("rank_mapping_by_profile", {})
-        rank_mapping = rank_mapping_by_profile.get(profile_key) or guild_config.get("rank_mapping", {})
+        rank_mapping = _rank_mapping_for_profile(guild_config, profile_key)
         mapped_role_id = rank_mapping.get(rank_title) or rank_mapping.get(result.rank_name)
         member_role_id = guild_config.get("roles", {}).get("member_role_id", 0)
         target_role_id = int(mapped_role_id or member_role_id or 0)
@@ -176,6 +216,9 @@ class RankSyncService:
         Applies the plan. Only the rank role last set by the bot is removed
         (previous_bot_role_id), not other mapped roles — manual assignments remain.
         """
+        if plan.protected_skip:
+            # Defensive: a protected / rank-locked plan never assigns a role.
+            return False, (plan.skip_reason or "protected")
         if not plan.rank_title:
             return False, "not_found"
         if not plan.target_role_id:
@@ -184,6 +227,9 @@ class RankSyncService:
         target = member.guild.get_role(int(plan.target_role_id))
         if not target:
             return False, "no_role"
+        if target.permissions.administrator or target.managed or target.is_default():
+            # Never hand out administrator / managed / @everyone roles automatically.
+            return False, "unsafe_role"
 
         to_remove: List[discord.Role] = []
         prev = int(previous_bot_role_id or 0)

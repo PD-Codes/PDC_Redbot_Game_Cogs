@@ -11,7 +11,10 @@ from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 from redbot.core.utils.chat_formatting import humanize_list
 from tabulate import tabulate
 
+from .autocomplete import GAME
+from .blizzard_rest import BlizzardAPIError, fetch_guild_roster
 from .exceptions import InvalidBlizzardAPI
+from .pdc_dashboard import tr_lang
 
 _ = Translator("WoWTools", __file__)
 log = logging.getLogger("red.karlo-cogs.wowtools")
@@ -163,25 +166,52 @@ class GuildManage:
         :return: dict containing guild members and their rank
         """
         wow_guild_name: str = await self.config.guild(guild).gmanage_guild()
-        wow_guild_name = wow_guild_name.lower()
         region: str = await self.config.guild(guild).region()
         realm: str = await self.config.guild(guild).gmanage_realm()
-        realm = realm.lower()
+        if not wow_guild_name or not realm:
+            # Callers treat AttributeError as "guild name/realm not configured".
+            raise AttributeError("gmanage guild name or realm not set")
+        if not region:
+            raise AttributeError("region not set")
 
-        if not self.blizzard.get(region):
-            raise InvalidBlizzardAPI
-        async with self.blizzard.get(region) as wow_client:
-            wow_client = wow_client.Classic
-            guild_roster = await wow_client.Profile.get_guild_roster(
-                name_slug=wow_guild_name, realm_slug=realm
-            )
+        # Plain REST call with this cog's namespace (profile-{r} / profile-classic-{r}):
+        # aiowowapi 2.1.5 has no Classic.Profile. Raises BlizzardAPIError on 403/404.
+        guild_roster = await fetch_guild_roster(self, region, realm.lower(), wow_guild_name.lower())
 
-        roster: dict[str, int] = {
-            f"{member['character']['name']}:{member['character']['realm']['slug']}": member["rank"]
-            + 1
-            for member in guild_roster["members"]
-        }
+        roster: dict[str, int] = {}
+        for member in guild_roster.get("members") or []:
+            char = (member or {}).get("character") or {}
+            name = char.get("name")
+            member_realm = (char.get("realm") or {}).get("slug") or realm.lower()
+            rank = member.get("rank")
+            if not name or not isinstance(rank, int):
+                continue
+            roster[f"{name}:{member_realm}"] = rank + 1
         return roster
+
+    async def _roster_error_message(self, ctx: commands.Context, error: Exception) -> str:
+        lang = await self.config.guild(ctx.guild).language() if ctx.guild else "en-US"
+        if isinstance(error, AttributeError):
+            return _("Please use `{prefix}gmset` and set the name and realm of your guild.").format(
+                prefix=ctx.prefix
+            )
+        if isinstance(error, BlizzardAPIError) and error.status == 404:
+            return tr_lang(
+                lang,
+                "Gilde nicht gefunden. Bitte Gildenname, Realm und Region prüfen.",
+                "Guild not found. Please check guild name, realm and region.",
+            )
+        if isinstance(error, BlizzardAPIError) and error.status == 403:
+            return tr_lang(
+                lang,
+                "Der Gilden-Roster ist für dieses Spiel über die Blizzard-API nicht verfügbar.",
+                "The guild roster is not available for this game via the Blizzard API.",
+            )
+        return tr_lang(
+            lang,
+            f"Fehler beim Abrufen des Gilden-Rosters: {error}",
+            f"Failed to fetch the guild roster: {error}",
+        )
 
     @gmset.command(
         description="Set the channel for guild join/leave/promotion logs.",
@@ -209,6 +239,10 @@ class GuildManage:
                     "filling in `whoops` with your client's ID and secret."
                 ).format(prefix=ctx.prefix)
             )
+            return
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError includes BlizzardAPIError (403/404/...)
+            await ctx.send(await self._roster_error_message(ctx, e))
             return
         await self.config.guild(ctx.guild).guild_log_channel.set(channel.id)
         await self.config.guild(ctx.guild).guild_roster.set(guild_roster)
@@ -243,6 +277,10 @@ class GuildManage:
                     "filling in `whoops` with your client's ID and secret."
                 ).format(prefix=ctx.prefix)
             )
+            return
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError includes BlizzardAPIError (403/404/...)
+            await ctx.send(await self._roster_error_message(ctx, e))
             return
         await self.config.guild(ctx.guild).guild_roster.set(guild_roster)
         await ctx.send(_("Guild log channel set to {channel}.").format(channel=channel.mention))
@@ -283,10 +321,16 @@ class GuildManage:
                         "filling in `whoops` with your client's ID and secret."
                     )
                     continue
-                except RuntimeError:
-                    # idk, try again later
+                except (RuntimeError, AttributeError):
+                    # API error (incl. BlizzardAPIError) or region missing: try again later
                     continue
                 previous_roster: dict[str, int] = await self.config.guild(guild).guild_roster()
+                if not previous_roster:
+                    # First run (or roster reset): store the baseline only, otherwise
+                    # every current member would be announced as a new join.
+                    if current_roster:
+                        await self.config.guild(guild).guild_roster.set(current_roster)
+                    continue
 
                 # Have to do this now because the key will include the realm name, meaning comparing
                 # means everything in previous will be different and it will send a message for
@@ -307,8 +351,9 @@ class GuildManage:
                 embeds = await self.get_event_embeds(difference, guild)
                 await self.config.guild(guild).guild_roster.set(current_roster)
 
-                for i in range((len(embeds) // 10) + 1):
-                    await guild_log_channel.send(embeds=embeds[i * 10 : (i + 1) * 10], silent=True)
+                # Discord allows max. 10 embeds per message; never send an empty batch.
+                for i in range(0, len(embeds), 10):
+                    await guild_log_channel.send(embeds=embeds[i : i + 10], silent=True)
             except Exception as e:
                 log.exception("Guild log update failed for guild %s: %s", guild.id, e)
                 continue
@@ -323,9 +368,20 @@ class GuildManage:
         if member.bot:
             return
 
+        # Check the welcome channel before any API call.
+        guild_log_channel_id: int = await self.config.guild(guild).guild_log_welcome_channel()
+        if not guild_log_channel_id:
+            return
+        guild_log_channel = guild.get_channel_or_thread(guild_log_channel_id)
+        if not guild_log_channel:
+            return
+
         try:
             ingame_members, rank = await self.guess_ingame_member(guild, member.display_name)
         except (AttributeError, ValueError):
+            return
+        except BlizzardAPIError as e:
+            log.debug("Guild roster lookup failed in guild %s: %s", guild.id, e)
             return
         except InvalidBlizzardAPI:
             log.warning(
@@ -358,13 +414,6 @@ class GuildManage:
             description=desc,
             color=discord.Colour.green(),
         )
-
-        guild_log_channel_id: int = await self.config.guild(guild).guild_log_welcome_channel()
-        if not guild_log_channel_id:
-            return
-        guild_log_channel = guild.get_channel_or_thread(guild_log_channel_id)
-        if not guild_log_channel:
-            return
 
         if guild_log_channel.permissions_for(guild.me).embed_links:
             await guild_log_channel.send(
@@ -478,9 +527,10 @@ class GuildManage:
 
     @staticmethod
     def get_raiderio_url(realm: str, region: str, name: str) -> str:
+        host = "classic.raider.io" if GAME == "classic" else "raider.io"
         return (
-            f"[classic.raider.io]"
-            f"(https://classic.classic.raider.io/characters/{region.lower()}/{realm.lower()}/{name})"
+            f"[{host}]"
+            f"(https://{host}/characters/{(region or '').lower()}/{realm.lower()}/{name})"
         )
 
     @staticmethod
@@ -539,6 +589,9 @@ class GuildManage:
                     prefix=ctx.prefix
                 )
             )
+            return
+        except BlizzardAPIError as e:
+            await ctx.send(await self._roster_error_message(ctx, e))
             return
         except InvalidBlizzardAPI:
             await ctx.send(

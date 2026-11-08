@@ -12,13 +12,13 @@ from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_g
 
 from .autocomplete import (
     REGIONS,
-    REALMS as AC_REALMS,
-    fetch_realm_names,
+    realm_choices,
     _LANG_CODES as AC_LANG_CODES,
     _API_HOST,
     _AUTH_HOST,
 )
 from .pdc_dashboard import tr_lang
+from .blizzard_rest import character_segment, realm_segment, reset_token_caches
 
 _ = Translator("WoWTools", __file__)
 
@@ -97,6 +97,8 @@ async def _fetch_statistics(
     async with aiohttp.ClientSession() as s:
         async with s.get(url, params=params, headers=headers) as resp:
             js = await resp.json()
+            if resp.status == 401:
+                reset_token_caches(self)
             if resp.status != 200:
                 raise RuntimeError(f"{resp.status}: {js}")
             return js
@@ -138,11 +140,11 @@ class CharInfo(commands.Cog):
         lang = await self.config.guild(ctx.guild).language() if ctx.guild else "en-US"
         region = region.lower()
         locale = _resolve_locale(locale)
-        realm_slug = realm.lower().replace(" ", "-")
-        char_slug = character.lower()
+        realm_slug = realm_segment(realm, region)
+        char_slug = character_segment(character)
 
         try:
-            await ctx.defer()
+            await ctx.defer(ephemeral=private)
         except Exception:
             pass
 
@@ -217,10 +219,8 @@ class CharInfo(commands.Cog):
     @charinfo.autocomplete("realm")
     async def ac_realm(self, interaction: discord.Interaction, current: str):
         sel_region = getattr(interaction.namespace, "region", "") or "eu"
-        cur = (current or "").lower()
-        names = await fetch_realm_names(lambda r: _get_access_token(self, r), sel_region)
-        out = [n for n in names if not cur or cur in n.lower()]
-        return [app_commands.Choice(name=r, value=r) for r in out[:25]]
+        # Choice value = Blizzard realm slug, label = realm name.
+        return await realm_choices(lambda r: _get_access_token(self, r), sel_region, current)
 
     @charinfo.autocomplete("locale")
     async def ac_locale(self, interaction: discord.Interaction, current: str):

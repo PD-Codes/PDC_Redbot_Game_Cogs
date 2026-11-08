@@ -14,7 +14,7 @@ import asyncio
 import datetime
 import logging
 import time
-from typing import List, Optional
+from typing import Dict, Optional, Tuple
 
 import aiohttp
 import discord
@@ -37,11 +37,12 @@ from .pdc_dashboard import (
 
 log = logging.getLogger("red.pdc.wowtokentracker")
 
-_API_HOST = {"eu": "eu.api.blizzard.com", "us": "us.api.blizzard.com", "kr": "kr.api.blizzard.com", "tw": "kr.api.blizzard.com"}
+_API_HOST = {"eu": "eu.api.blizzard.com", "us": "us.api.blizzard.com", "kr": "kr.api.blizzard.com", "tw": "tw.api.blizzard.com"}
 _AUTH_HOST = {"eu": "eu.battle.net", "us": "us.battle.net", "kr": "apac.battle.net", "tw": "apac.battle.net"}
 _REGIONS = ["eu", "us", "kr", "tw"]
 _CAP = 720  # samples kept per series (~30 days hourly)
 _INTERVAL = 3600  # seconds between samples
+_MAX_REF_GAP = 7200  # max deviation (s) of a 24h/7d reference sample
 
 
 class WoWTokenTracker(commands.Cog):
@@ -58,6 +59,8 @@ class WoWTokenTracker(commands.Cog):
             language="en-US",
         )
         self._task: Optional[asyncio.Task] = None
+        self._tokens: Dict[str, Tuple[str, float]] = {}  # region -> (token, expires_at)
+        self._warned: set = set()  # series keys already logged for a failure
 
     async def cog_load(self) -> None:
         register_dashboard(self)
@@ -89,17 +92,20 @@ class WoWTokenTracker(commands.Cog):
         lang = await self.config.language()
         if not hist:
             return WidgetData.markdown(self._t(lang, "Noch keine Token-Daten gesammelt.", "No token data collected yet."))
-        # Labels from the longest series; all series captured at the same ticks so
-        # they align by index (shorter ones are padded with leading gaps).
-        longest = max(hist, key=lambda k: len(hist[k]))
-        base = hist[longest]
-        labels = [datetime.datetime.utcfromtimestamp(int(ts)).strftime("%m-%d %H:%M") for ts, _ in base]
-        n = len(labels)
-        series = []
+        # Align all series on the union of their timestamps (rounded to the hour);
+        # missing values are None.
+        by_key = {}
+        stamps = set()
         for key, points in hist.items():
-            data = [round(int(p) / 10000) for _, p in points]
-            data = [None] * max(0, n - len(data)) + data[-n:]
-            series.append({"label": key, "data": data})
+            m = {}
+            for ts, p in points:
+                hour = int(ts) // 3600 * 3600
+                m[hour] = round(int(p) / 10000)
+            by_key[key] = m
+            stamps.update(m)
+        ordered = sorted(stamps)
+        labels = [datetime.datetime.utcfromtimestamp(t).strftime("%m-%d %H:%M") for t in ordered]
+        series = [{"label": key, "data": [m.get(t) for t in ordered]} for key, m in by_key.items()]
         return WidgetData.chart(series, chart_type="line", labels=labels)
 
     # ------------------------------------------------------------------ #
@@ -168,6 +174,9 @@ class WoWTokenTracker(commands.Cog):
     # Blizzard API
     # ------------------------------------------------------------------ #
     async def _access_token(self, region: str) -> Optional[str]:
+        cached = self._tokens.get(region)
+        if cached and cached[1] > time.time():
+            return cached[0]
         tokens = await self.bot.get_shared_api_tokens("blizzard")
         cid, secret = tokens.get("client_id"), tokens.get("client_secret")
         if not cid or not secret:
@@ -182,10 +191,25 @@ class WoWTokenTracker(commands.Cog):
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as r:
                     js = await r.json()
-            return js.get("access_token")
+                    status = r.status
+            token = js.get("access_token")
+            if not token:
+                self._warn_once(f"oauth:{region}", f"OAuth for {region} failed (HTTP {status})")
+                return None
+            self._warned.discard(f"oauth:{region}")
+            ttl = float(js.get("expires_in") or 0)
+            # Refresh a minute early; never cache for longer than the token lives.
+            self._tokens[region] = (token, time.time() + max(0.0, ttl - 60))
+            return token
         except Exception:
+            self._warn_once(f"oauth:{region}", f"OAuth for {region} failed")
             log.debug("oauth failed for %s", region, exc_info=True)
             return None
+
+    def _warn_once(self, key: str, msg: str) -> None:
+        if key not in self._warned:
+            self._warned.add(key)
+            log.warning(msg)
 
     async def _fetch_price(self, region: str, game: str) -> Optional[int]:
         token = await self._access_token(region)
@@ -194,6 +218,7 @@ class WoWTokenTracker(commands.Cog):
         host = _API_HOST.get(region)
         if not host:
             return None
+        key = f"{game}:{region}"
         namespace = f"dynamic-{region}" if game == "retail" else f"dynamic-classic-{region}"
         try:
             async with aiohttp.ClientSession() as s:
@@ -204,10 +229,17 @@ class WoWTokenTracker(commands.Cog):
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as r:
                     if r.status != 200:
+                        if r.status == 401:
+                            self._tokens.pop(region, None)  # force a fresh token next time
+                        self._warn_once(key, f"Token price fetch for {key} failed (HTTP {r.status}, {host}, {namespace})")
                         return None
                     js = await r.json()
-            return int(js.get("price")) if js.get("price") is not None else None
+            if js.get("price") is None:
+                return None
+            self._warned.discard(key)
+            return int(js.get("price"))
         except Exception:
+            self._warn_once(key, f"Token price fetch for {key} failed")
             log.debug("price fetch failed %s/%s", region, game, exc_info=True)
             return None
 
@@ -231,16 +263,20 @@ class WoWTokenTracker(commands.Cog):
         regions = await self.config.regions()
         games = ["retail"] + (["classic"] if await self.config.classic() else [])
         now = int(time.time())
+        # Fetch everything first; only hold the config lock for the short write.
+        fetched = {}
+        for region in regions:
+            for game in games:
+                price = await self._fetch_price(region, game)
+                if price is not None:
+                    fetched[f"{game}:{region}"] = price
+        if not fetched:
+            return
         async with self.config.history() as hist:
-            for region in regions:
-                for game in games:
-                    price = await self._fetch_price(region, game)
-                    if price is None:
-                        continue
-                    key = f"{game}:{region}"
-                    series = hist.get(key) or []
-                    series.append([now, price])
-                    hist[key] = series[-_CAP:]
+            for key, price in fetched.items():
+                series = hist.get(key) or []
+                series.append([now, price])
+                hist[key] = series[-_CAP:]
 
     # ------------------------------------------------------------------ #
     # Commands
@@ -264,9 +300,14 @@ class WoWTokenTracker(commands.Cog):
         if current is None and series:
             current = series[-1][1]
 
-        def _ago(samples_back: int) -> Optional[int]:
-            if len(series) > samples_back:
-                return series[-1 - samples_back][1]
+        now = int(time.time())
+
+        def _ago(age: int) -> Optional[int]:
+            """Price of the newest sample at least ``age`` seconds old (max ~2h off)."""
+            target = now - age
+            for ts, price in reversed(series):
+                if int(ts) <= target:
+                    return price if target - int(ts) <= _MAX_REF_GAP else None
             return None
 
         prices = [p for _, p in series] + [current]
@@ -276,8 +317,8 @@ class WoWTokenTracker(commands.Cog):
             colour=discord.Colour.gold(),
         )
         e.add_field(name=self._t(lang, "Aktuell", "Current"), value=self._gold(current), inline=True)
-        d1 = _ago(24)
-        d7 = _ago(168)
+        d1 = _ago(86400)
+        d7 = _ago(604800)
         if d1 is not None:
             diff = current - d1
             e.add_field(name="24h", value=f"{'+' if diff >= 0 else ''}{self._gold(diff) if diff >= 0 else '-' + self._gold(abs(diff))}", inline=True)

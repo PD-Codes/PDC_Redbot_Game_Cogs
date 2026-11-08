@@ -1,13 +1,15 @@
 import asyncio
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
 
 from ..character_helpers import (
+    GAME_FOREVER,
+    game_for_profile,
     game_label,
     merge_rank_sync_game_state,
-    profile_key_to_link_game,
 )
 from ..functions.automations import RankSyncService
 from ..officer_notifications import send_rank_lock_officer_notice, send_protected_rank_officer_notice
@@ -141,20 +143,37 @@ class AlliedGuildSelectView(discord.ui.View):
 class MainCharModal(discord.ui.Modal, title="Main Character"):
     char_name = discord.ui.TextInput(label="Main Character Name", max_length=40, required=True)
 
-    def __init__(self) -> None:
+    def __init__(self, forever: bool = False, lang: str = "en-US") -> None:
         super().__init__()
         self.value: Optional[str] = None
+        self.forever = forever
+        self.surname: Optional[discord.ui.TextInput] = None
+        if forever:
+            # WoW Forever: first name alone is not unique -> ask for the surname as well.
+            self.char_name.label = tr_lang(lang, "Vorname (WoW Forever)", "First name (WoW Forever)")
+            self.surname = discord.ui.TextInput(
+                label=tr_lang(lang, "Nachname (WoW Forever)", "Surname (WoW Forever)"),
+                max_length=40,
+                required=True,
+            )
+            self.add_item(self.surname)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        self.value = str(self.char_name.value).strip()
+        name = str(self.char_name.value).strip()
+        if self.surname is not None:
+            # Stored/compared as "Name Surname"; helpers split it into name + surname.
+            name = f"{name} {str(self.surname.value).strip()}".strip()
+        self.value = name
         await interaction.response.send_message("Character received.", ephemeral=True)
 
 
 class MainCharView(discord.ui.View):
-    def __init__(self, user_id: int, timeout: int = 300) -> None:
+    def __init__(self, user_id: int, timeout: int = 300, *, forever: bool = False, lang: str = "en-US") -> None:
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.value: Optional[str] = None
+        self.forever = forever
+        self.lang = lang
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -165,7 +184,7 @@ class MainCharView(discord.ui.View):
     @discord.ui.button(label="Open Input", style=discord.ButtonStyle.success)
     async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         _ = button
-        modal = MainCharModal()
+        modal = MainCharModal(forever=self.forever, lang=self.lang)
         await interaction.response.send_modal(modal)
         await modal.wait()
         if modal.value:
@@ -185,156 +204,203 @@ class RulesConfirmView(ChoiceView):
         super().__init__(user_id=user_id, options=[(label, "confirmed")], timeout=timeout)
 
 
-class ManualVerificationDecisionView(discord.ui.View):
-    def __init__(
-        self,
-        member: discord.Member,
-        member_role: Optional[discord.Role],
-        *,
-        char_name: str,
-        selected_game: str,
-        timeout: int = 172800,
-        lang: str = "en-US",
-    ) -> None:
-        super().__init__(timeout=timeout)
-        self.member = member
-        self.member_role = member_role
-        self.char_name = char_name
-        self.selected_game = selected_game
-        self.lang = lang
-        self.resolved = False
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                if child.label == "Bestaetigen":
-                    child.label = tr_lang(lang, "Bestaetigen", "Approve")
-                elif child.label == "Ablehnen":
-                    child.label = tr_lang(lang, "Ablehnen", "Reject")
+# --- Persistent manual verification buttons ---------------------------------------
+# The custom_id encodes guild and member, so the buttons keep working after a bot restart.
+MV_CUSTOM_ID_PREFIX = "wga:mv:"
+_MV_PATTERN = r"wga:mv:(?P<action>approve|reject):(?P<guild_id>[0-9]+):(?P<member_id>[0-9]+)"
+_MV_RE = re.compile("^" + _MV_PATTERN + "$")
+MANUAL_VERIFICATION_USES_DYNAMIC_ITEM = hasattr(discord.ui, "DynamicItem")
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        actor = interaction.user
-        if not isinstance(actor, discord.Member):
-            await interaction.response.send_message(
-                tr_lang(self.lang, "Nur auf dem Server verfuegbar.", "Only available on the server."),
-                ephemeral=True,
-            )
-            return False
-        if actor.guild_permissions.manage_guild or actor.guild_permissions.administrator:
-            return True
-        await interaction.response.send_message(
+
+def parse_manual_verification_custom_id(custom_id: Any) -> Optional[Tuple[str, int, int]]:
+    """'wga:mv:<approve|reject>:<guild_id>:<member_id>' -> (action, guild_id, member_id)."""
+    m = _MV_RE.match(str(custom_id or ""))
+    if not m:
+        return None
+    return m.group("action"), int(m.group("guild_id")), int(m.group("member_id"))
+
+
+def _mv_button(action: str, guild_id: int, member_id: int, lang: str = "en-US") -> discord.ui.Button:
+    approve = action == "approve"
+    return discord.ui.Button(
+        label=tr_lang(lang, "Bestaetigen", "Approve") if approve else tr_lang(lang, "Ablehnen", "Reject"),
+        style=discord.ButtonStyle.success if approve else discord.ButtonStyle.danger,
+        emoji="\u2705" if approve else "\u274c",
+        custom_id=f"{MV_CUSTOM_ID_PREFIX}{action}:{int(guild_id)}:{int(member_id)}",
+    )
+
+
+async def _mv_reply(interaction: discord.Interaction, text: str) -> None:
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
+async def handle_manual_verification_click(
+    cog: Any,
+    interaction: discord.Interaction,
+    action: str,
+    guild_id: int,
+    member_id: int,
+) -> None:
+    """Approve / reject a pending manual verification. Permission is checked on every click."""
+    guild = interaction.guild
+    if cog is None or guild is None or guild.id != int(guild_id):
+        await _mv_reply(interaction, "Dieser Button ist nicht mehr gueltig. / This button is no longer valid.")
+        return
+    lang = await cog._guild_lang(guild)
+    actor = interaction.user
+    if not isinstance(actor, discord.Member) or not (
+        actor.guild_permissions.manage_guild or actor.guild_permissions.administrator
+    ):
+        await _mv_reply(
+            interaction,
             tr_lang(
-                self.lang,
+                lang,
                 "Keine Berechtigung. Du brauchst 'Server verwalten' oder Administrator.",
                 "No permission. You need 'Manage Server' or Administrator.",
             ),
-            ephemeral=True,
         )
+        return
+    member = guild.get_member(int(member_id))
+    if member is None:
+        await _mv_reply(
+            interaction,
+            tr_lang(lang, "Mitglied ist nicht (mehr) auf dem Server.", "Member is no longer on the server."),
+        )
+        return
+    cfg = await cog._guild_config(guild)
+    member_role = guild.get_role(int((cfg.get("roles") or {}).get("member_role_id", 0) or 0))
+    conf = cog.config.member(member)
+    async with cog._member_lock(guild.id, member.id):
+        session = str(await conf.onboarding_session_id() or "")
+        reg_raw = await conf.registration()
+        reg = dict(reg_raw) if isinstance(reg_raw, dict) else {}
+        if reg.get("manual_review") in ("approved", "rejected") and str(reg.get("manual_review_session") or "") == session:
+            await _mv_reply(interaction, tr_lang(lang, "Bereits bearbeitet.", "Already handled."))
+            return
+        if action == "approve":
+            if member_role is None:
+                await _mv_reply(
+                    interaction,
+                    tr_lang(
+                        lang,
+                        "Keine Member-Rolle konfiguriert oder Rolle nicht gefunden.",
+                        "No member role configured or role not found.",
+                    ),
+                )
+                return
+            if member_role not in member.roles:
+                try:
+                    await member.add_roles(
+                        member_role,
+                        reason=f"WoW manual verification approved by {actor} ({actor.id})",
+                    )
+                except discord.Forbidden:
+                    await _mv_reply(
+                        interaction,
+                        tr_lang(
+                            lang,
+                            "Der Bot darf die Member-Rolle nicht setzen (Rechte / Rollen-Reihenfolge).",
+                            "The bot may not assign the member role (permissions / role order).",
+                        ),
+                    )
+                    return
+                except discord.HTTPException as exc:
+                    await _mv_reply(
+                        interaction,
+                        tr_lang(lang, f"Rolle konnte nicht gesetzt werden: {exc}", f"Role could not be assigned: {exc}"),
+                    )
+                    return
+            reg["verified"] = True
+            reg["requires_manual_verification"] = False
+            note = tr_lang(
+                lang,
+                f"\u2705 Manuell bestaetigt von {actor.mention} (Rolle {member_role.mention}).",
+                f"\u2705 Manually approved by {actor.mention} (role {member_role.mention}).",
+            )
+        else:
+            note = tr_lang(
+                lang,
+                f"\u274c Manuelle Verifizierung abgelehnt von {actor.mention}.",
+                f"\u274c Manual verification rejected by {actor.mention}.",
+            )
+        reg["manual_review"] = "approved" if action == "approve" else "rejected"
+        reg["manual_review_by"] = int(actor.id)
+        reg["manual_review_session"] = session
+        await conf.registration.set(reg)
+    content = (interaction.message.content if interaction.message else "") or ""
+    new_content = content[: max(0, 2000 - len(note) - 1)] + "\n" + note
+    try:
+        await interaction.response.edit_message(content=new_content, view=None)
+    except discord.HTTPException:
+        await _mv_reply(interaction, note)
+
+
+if MANUAL_VERIFICATION_USES_DYNAMIC_ITEM:
+
+    class ManualVerificationButton(discord.ui.DynamicItem[discord.ui.Button], template=_MV_PATTERN):
+        """Persistent approve/reject button (discord.py >= 2.4); all state lives in the custom_id."""
+
+        def __init__(self, action: str, guild_id: int, member_id: int, lang: str = "en-US") -> None:
+            super().__init__(_mv_button(action, guild_id, member_id, lang))
+            self.action = action
+            self.guild_id = int(guild_id)
+            self.member_id = int(member_id)
+
+        @classmethod
+        async def from_custom_id(
+            cls, interaction: discord.Interaction, item: discord.ui.Button, match: "re.Match[str]"
+        ) -> "ManualVerificationButton":
+            return cls(match["action"], int(match["guild_id"]), int(match["member_id"]))
+
+        async def callback(self, interaction: discord.Interaction) -> None:
+            cog = interaction.client.get_cog("WowGuildAutomation")
+            await handle_manual_verification_click(cog, interaction, self.action, self.guild_id, self.member_id)
+
+else:
+    ManualVerificationButton = None  # type: ignore[assignment,misc]
+
+
+def build_manual_verification_view(guild_id: int, member_id: int, lang: str = "en-US") -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    for action in ("approve", "reject"):
+        if ManualVerificationButton is not None:
+            view.add_item(ManualVerificationButton(action, guild_id, member_id, lang))
+        else:
+            view.add_item(_mv_button(action, guild_id, member_id, lang))
+    return view
+
+
+async def send_manual_verification_prompt(
+    channel: discord.abc.Messageable,
+    content: str,
+    guild_id: int,
+    member_id: int,
+    lang: str = "en-US",
+) -> discord.Message:
+    view = build_manual_verification_view(guild_id, member_id, lang)
+    msg = await channel.send(content, view=view)
+    if ManualVerificationButton is None:
+        # Fallback (discord.py < 2.4): clicks are handled by the cog's on_interaction listener,
+        # so the in-memory view must not dispatch as well.
+        view.stop()
+    return msg
+
+
+async def _safe_add_role(member: discord.Member, role: Optional[discord.Role], reason: str) -> bool:
+    """Adds a role; returns False instead of raising on Forbidden / HTTP errors."""
+    if role is None or role in member.roles:
+        return True
+    try:
+        await member.add_roles(role, reason=reason)
+        return True
+    except (discord.Forbidden, discord.HTTPException):
         return False
-
-    async def _mark_resolved(self, interaction: discord.Interaction, note: str) -> None:
-        self.resolved = True
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        try:
-            msg = interaction.message
-            if msg:
-                await msg.edit(content=f"{msg.content}\n{note}", view=self)
-        except Exception:
-            pass
-        self.stop()
-
-    @discord.ui.button(label="Bestaetigen", style=discord.ButtonStyle.success, emoji="✅")
-    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        _ = button
-        if self.resolved:
-            await interaction.response.send_message(
-                tr_lang(self.lang, "Bereits bearbeitet.", "Already handled."), ephemeral=True
-            )
-            return
-        if self.member_role is None:
-            await interaction.response.send_message(
-                tr_lang(
-                    self.lang,
-                    "Keine Member-Rolle konfiguriert oder Rolle nicht gefunden.",
-                    "No member role configured or role not found.",
-                ),
-                ephemeral=True,
-            )
-            return
-        if self.member_role in self.member.roles:
-            await interaction.response.send_message(
-                tr_lang(
-                    self.lang,
-                    f"{self.member.mention} hat die Member-Rolle bereits.",
-                    f"{self.member.mention} already has the member role.",
-                ),
-                ephemeral=True,
-            )
-            await self._mark_resolved(
-                interaction,
-                tr_lang(
-                    self.lang,
-                    f"\n✅ Manuell bestaetigt von {interaction.user.mention} (Rolle war bereits vorhanden).",
-                    f"\n✅ Manually approved by {interaction.user.mention} (role was already present).",
-                ),
-            )
-            return
-        try:
-            await self.member.add_roles(
-                self.member_role,
-                reason=f"WoW manual verification approved by {interaction.user} ({self.selected_game}/{self.char_name})",
-            )
-        except Exception as exc:
-            await interaction.response.send_message(
-                tr_lang(
-                    self.lang,
-                    f"Rolle konnte nicht gesetzt werden: {exc}",
-                    f"Role could not be assigned: {exc}",
-                ),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            tr_lang(
-                self.lang,
-                f"Manuell bestaetigt: {self.member.mention} hat jetzt {self.member_role.mention}.",
-                f"Manually approved: {self.member.mention} now has {self.member_role.mention}.",
-            ),
-            ephemeral=True,
-        )
-        await self._mark_resolved(
-            interaction,
-            tr_lang(
-                self.lang,
-                f"\n✅ Manuell bestaetigt von {interaction.user.mention} (Rolle {self.member_role.mention} gesetzt).",
-                f"\n✅ Manually approved by {interaction.user.mention} (role {self.member_role.mention} assigned).",
-            ),
-        )
-
-    @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, emoji="❌")
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        _ = button
-        if self.resolved:
-            await interaction.response.send_message(
-                tr_lang(self.lang, "Bereits bearbeitet.", "Already handled."), ephemeral=True
-            )
-            return
-        await interaction.response.send_message(
-            tr_lang(
-                self.lang,
-                f"Manuelle Verifizierung fuer {self.member.mention} wurde abgelehnt.",
-                f"Manual verification for {self.member.mention} was rejected.",
-            ),
-            ephemeral=True,
-        )
-        await self._mark_resolved(
-            interaction,
-            tr_lang(
-                self.lang,
-                f"\n❌ Manuelle Verifizierung abgelehnt von {interaction.user.mention}.",
-                f"\n❌ Manual verification rejected by {interaction.user.mention}.",
-            ),
-        )
 
 
 async def handle_new_member_onboarding(
@@ -346,6 +412,7 @@ async def handle_new_member_onboarding(
     onboarding_channel: Optional[discord.TextChannel] = None,
     *,
     member_config: Optional[Any] = None,
+    member_lock: Optional[asyncio.Lock] = None,
 ) -> dict:
     glang = str(guild_config.get("language") or "en-US")
     destination: discord.abc.Messageable
@@ -478,12 +545,10 @@ async def handle_new_member_onboarding(
                     selected_allied_guild = select_view.value
 
         if is_allied:
-            if allied_role:
-                await member.add_roles(allied_role, reason=f"WoW onboarding: allied ({selected_allied_guild})")
+            await _safe_add_role(member, allied_role, f"WoW onboarding: allied ({selected_allied_guild})")
             await destination.send(t["allied_done"].format(guild=selected_allied_guild))
         else:
-            if guest_role:
-                await member.add_roles(guest_role, reason="WoW onboarding: guest")
+            await _safe_add_role(member, guest_role, "WoW onboarding: guest")
             await destination.send(t["guest_done"])
 
         rules_confirmed = await confirm_rules()
@@ -508,26 +573,38 @@ async def handle_new_member_onboarding(
     selected_game = game_keys[0] if game_keys else "retail"
     game_labels: List[tuple[str, str]] = []
     for k in game_keys:
-        gtype = profile_key_to_link_game(k)
+        gtype = game_for_profile(k, wow_profiles.get(k))
         game_labels.append((f"{game_label(gtype)} ({k})", k))
     if not game_labels:
-        game_labels = [(game_label(profile_key_to_link_game(selected_game)), selected_game)]
+        game_labels = [(game_label(game_for_profile(selected_game, None)), selected_game)]
     elif len(game_labels) == 1:
         k0 = game_labels[0][1]
-        game_labels = [(game_label(profile_key_to_link_game(k0)), k0)]
+        game_labels = [(game_label(game_for_profile(k0, wow_profiles.get(k0))), k0)]
     game_view = ChoiceView(member.id, game_labels, timeout=180)
     await destination.send(t["game_prompt"], view=game_view)
     _ = await game_view.wait()
     if game_view.value:
         selected_game = game_view.value
 
-    modal_view = MainCharView(member.id, timeout=300)
-    await destination.send(t["mainchar_prompt"], view=modal_view)
+    sel_prof = wow_profiles.get(selected_game, {})
+    # Game type comes from the profile version (profile key only as fallback).
+    link_game = game_for_profile(selected_game, sel_prof)
+    forever_game = link_game == GAME_FOREVER
+    modal_view = MainCharView(member.id, timeout=300, forever=forever_game, lang=lang)
+    mainchar_prompt = t["mainchar_prompt"]
+    if forever_game:
+        mainchar_prompt += tr_lang(
+            lang,
+            " WoW Forever: bitte Vor- **und** Nachname angeben.",
+            " WoW Forever: please enter first name **and** surname.",
+        )
+    await destination.send(mainchar_prompt, view=modal_view)
     if await modal_view.wait() or not modal_view.value:
         await destination.send(t["mainchar_timeout"])
         return {
             "language": lang,
             "selected_game": selected_game,
+            "link_game": link_game,
             "registration": {
                 "type": "member",
                 "char_name": "",
@@ -540,33 +617,29 @@ async def handle_new_member_onboarding(
     main_char = modal_view.value.strip()
     selected_cfg = dict(guild_config)
     selected_cfg["wow"] = wow_profiles.get(selected_game, {})
-    rank_title, sync_reason, role_id = await rank_sync.sync_member_rank(
-        member,
-        selected_cfg,
-        main_char,
-        profile_key=selected_game,
-        previous_bot_role_id=0,
-    )
+    # Protected / rank-lock checks happen inside plan_sync BEFORE any role is assigned.
+    async with (member_lock or asyncio.Lock()):
+        rank_title, sync_reason, role_id = await rank_sync.sync_member_rank(
+            member,
+            selected_cfg,
+            main_char,
+            profile_key=selected_game,
+            previous_bot_role_id=0,
+        )
+        if sync_reason == "ok" and rank_title and member_config is not None:
+            await merge_rank_sync_game_state(
+                member_config,
+                link_game,
+                last_title=str(rank_title),
+                last_role_id=int(role_id or 0),
+            )
+        elif sync_reason in ("protected", "rank_locked") and rank_title and member_config is not None:
+            await merge_rank_sync_game_state(
+                member_config,
+                link_game,
+                last_title=str(rank_title),
+            )
     rank = rank_title if sync_reason == "ok" else None
-    if sync_reason == "ok" and rank_title and member_config is not None:
-        await merge_rank_sync_game_state(
-            member_config,
-            selected_game,
-            last_title=str(rank_title),
-            last_role_id=int(role_id or 0),
-        )
-    elif sync_reason == "protected" and rank_title and member_config is not None:
-        await merge_rank_sync_game_state(
-            member_config,
-            selected_game,
-            last_title=str(rank_title),
-        )
-    elif sync_reason == "rank_locked" and rank_title and member_config is not None:
-        await merge_rank_sync_game_state(
-            member_config,
-            selected_game,
-            last_title=str(rank_title),
-        )
     if sync_reason == "protected" and rank_title:
         await send_protected_rank_officer_notice(
             member.guild,
@@ -586,9 +659,16 @@ async def handle_new_member_onboarding(
             rank_title,
         )
     if rank:
-        if member_role and member_role not in member.roles:
-            await member.add_roles(member_role, reason="WoW onboarding: verified guild member")
+        role_ok = await _safe_add_role(member, member_role, "WoW onboarding: verified guild member")
         await destination.send(t["verified"].format(main=main_char, rank=rank))
+        if not role_ok and manual_channel:
+            await manual_channel.send(
+                tr_lang(
+                    glang,
+                    f"Member-Rolle konnte {member.mention} nicht gegeben werden (Bot-Rechte / Rollen-Reihenfolge).",
+                    f"Member role could not be given to {member.mention} (bot permissions / role order).",
+                )
+            )
         if manual_channel:
             await manual_channel.send(
                 tr_lang(
@@ -639,7 +719,8 @@ async def handle_new_member_onboarding(
                     f"Game type: {selected_game}. Character not found - manual verification required.",
                 )
             )
-            await manual_channel.send(
+            await send_manual_verification_prompt(
+                manual_channel,
                 tr_lang(
                     glang,
                     f"Bitte Entscheidung treffen fuer {member.mention} "
@@ -647,13 +728,9 @@ async def handle_new_member_onboarding(
                     f"Please make a decision for {member.mention} "
                     f"(character: `{main_char}`, game type: `{selected_game}`).",
                 ),
-                view=ManualVerificationDecisionView(
-                    member=member,
-                    member_role=member_role,
-                    char_name=main_char,
-                    selected_game=selected_game,
-                    lang=glang,
-                ),
+                member.guild.id,
+                member.id,
+                lang=glang,
             )
         await destination.send(t["manual"])
 
@@ -663,6 +740,7 @@ async def handle_new_member_onboarding(
         return {
             "language": lang,
             "selected_game": selected_game,
+            "link_game": link_game,
             "registration": {
                 "type": "member",
                 "char_name": main_char,
@@ -675,6 +753,7 @@ async def handle_new_member_onboarding(
     return {
         "language": lang,
         "selected_game": selected_game,
+        "link_game": link_game,
         "registration": {
             "type": "member",
             "char_name": main_char,

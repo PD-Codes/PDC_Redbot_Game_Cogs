@@ -9,7 +9,8 @@ from discord import app_commands
 from redbot.core import commands
 from redbot.core.bot import Red
 from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_guild
-from .autocomplete import REALMS as AC_REALMS, REGIONS as AC_REGIONS, _LANG_CODES, _API_HOST, _AUTH_HOST, fetch_realm_names
+from .autocomplete import _LANG_CODES, _API_HOST, _AUTH_HOST, realm_choices
+from .blizzard_rest import character_segment, realm_segment, reset_token_caches
 from .pdc_dashboard import tr_lang
 
 _ = Translator("WoWTools", __file__)
@@ -93,8 +94,8 @@ async def _fetch_equipment_blizzard(self, *, region: str, realm: str, character:
                                     game: str = "retail", locale: str = "en_US") -> dict:
     host = _API_HOST.get(region, "eu.api.blizzard.com")
     token = await _get_access_token_cached_gear(self, region)
-    realm_slug = realm.lower().replace(" ", "-")
-    char_slug = character.lower()
+    realm_slug = realm_segment(realm, region)
+    char_slug = character_segment(character)
     namespace = f"profile-{region}"
     url = f"https://{host}/profile/wow/character/{realm_slug}/{char_slug}/equipment"
     params = {"namespace": namespace, "locale": locale}
@@ -102,6 +103,8 @@ async def _fetch_equipment_blizzard(self, *, region: str, realm: str, character:
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, headers=headers) as resp:
             js = await resp.json()
+            if resp.status == 401:
+                reset_token_caches(self)
             if resp.status != 200:
                 raise RuntimeError(f"{resp.status}: {js}")
             return js
@@ -166,8 +169,8 @@ class GearCheck(commands.Cog):
     ) -> dict:
         host = _API_HOST.get(region, "eu.api.blizzard.com")
         token = await _get_access_token_cached_gear(self, region)
-        realm_slug = realm.lower().replace(" ", "-")
-        char_slug = character.lower()
+        realm_slug = realm_segment(realm, region)
+        char_slug = character_segment(character)
 
         namespace = f"profile-{region}"
         url = f"https://{host}/profile/wow/character/{realm_slug}/{char_slug}/equipment"
@@ -177,6 +180,8 @@ class GearCheck(commands.Cog):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, headers=headers) as resp:
                 js = await resp.json()
+                if resp.status == 401:
+                    reset_token_caches(self)
                 if resp.status != 200:
                     raise RuntimeError(f"{resp.status}: {js}")
                 return js
@@ -336,10 +341,8 @@ class GearCheck(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> List[app_commands.Choice[str]]:
         sel_region = getattr(interaction.namespace, "region", "") or "eu"
-        cur = (current or "").lower()
-        names = await fetch_realm_names(lambda r: _get_access_token_cached_gear(self, r), sel_region)
-        out = [n for n in names if not cur or cur in n.lower()]
-        return [app_commands.Choice(name=r, value=r) for r in out[:25]]
+        # Choice value = Blizzard realm slug, label = realm name.
+        return await realm_choices(lambda r: _get_access_token_cached_gear(self, r), sel_region, current)
 
     @gearcheck.autocomplete("locale")
     async def ac_locale(
@@ -354,7 +357,7 @@ class GearCheck(commands.Cog):
         }
 
         pairs: List[tuple[str, str]] = []
-        for short, full in AC_LANG_CODES.items():
+        for short, full in _LANG_CODES.items():
             label_base = display_map.get(short, short)
             # full locale
             pairs.append((f"{label_base} ({full})", full))

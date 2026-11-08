@@ -13,13 +13,13 @@ from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_g
 # zentrale Tabellen aus autocomplete.py
 from .autocomplete import (
     REGIONS,
-    REALMS as AC_REALMS,
-    fetch_realm_names,
+    realm_choices,
     _LANG_CODES as AC_LANG_CODES,
     _API_HOST,
     _AUTH_HOST,
 )
 from .pdc_dashboard import tr_lang
+from .blizzard_rest import character_segment, realm_segment, reset_token_caches
 
 _ = Translator("WoWTools", __file__)
 
@@ -84,9 +84,36 @@ async def _fetch_specializations(
     async with aiohttp.ClientSession() as s:
         async with s.get(url, params=params, headers=headers) as resp:
             js = await resp.json()
+            if resp.status == 401:
+                reset_token_caches(self)
             if resp.status != 200:
                 raise RuntimeError(f"{resp.status}: {js}")
             return js
+
+_MAX_DESC = 3900
+
+
+def _iter_spec_talents(spec: dict):
+    """Yield talent entries of a specialization node in both API shapes.
+
+    * classic: ``spec["talents"]`` (each with ``talent`` / ``spell_tooltip``)
+    * retail: ``spec["loadouts"][active]["selected_class_talents" |
+      "selected_spec_talents" | "selected_hero_talents"]`` (each with
+      ``tooltip.talent`` / ``tooltip.spell_tooltip``)
+    """
+    for t in spec.get("talents") or []:
+        if isinstance(t, dict):
+            yield t
+    loadouts = [lo for lo in (spec.get("loadouts") or []) if isinstance(lo, dict)]
+    if not loadouts:
+        return
+    # Only the active loadout (fallback: the first one) to keep the output short.
+    loadout = next((lo for lo in loadouts if lo.get("is_active")), loadouts[0])
+    for key in ("selected_class_talents", "selected_spec_talents", "selected_hero_talents"):
+        for t in loadout.get(key) or []:
+            if isinstance(t, dict):
+                yield t
+
 
 @cog_i18n(_)
 class TalentCheck(commands.Cog):
@@ -119,8 +146,8 @@ class TalentCheck(commands.Cog):
         region = region.lower()
         locale = _resolve_locale(locale)
         # Slugs
-        realm_slug = realm.lower().replace(" ", "-")
-        char_slug = character.lower()
+        realm_slug = realm_segment(realm, region)
+        char_slug = character_segment(character)
 
         try:
             await ctx.defer(ephemeral=private)
@@ -146,18 +173,18 @@ class TalentCheck(commands.Cog):
             header = f"**{spec_name}**" + ((tr_lang(lang, "  *(aktiv)*", "  *(active)*")) if active_spec and spec_name == active_spec else "")
             spec_lines.append(header)
 
-            # Talente
-            talents = spec.get("talents") or []
-            if talents:
-                for t in talents:
-                    tt = t.get("spell_tooltip") or {}
-                    spell = (tt.get("spell") or {})
-                    spell_name = spell.get("name") or (t.get("talent") or {}).get("name") or "?"
-                    spell_id = spell.get("id")
-                    if spell_id:
-                        spec_lines.append(f"`└──` **Talent:** [{spell_name}]({_wowhead_spell(spell_id)})")
-                    else:
-                        spec_lines.append(f"`└──` **Talent:** {spell_name}")
+            # Talents: classic shape `specializations[].talents[]`; retail (since
+            # Dragonflight) `specializations[].loadouts[].selected_*_talents[]`.
+            for t in _iter_spec_talents(spec):
+                tt = t.get("spell_tooltip") or (t.get("tooltip") or {}).get("spell_tooltip") or {}
+                spell = (tt.get("spell") or {})
+                talent = t.get("talent") or (t.get("tooltip") or {}).get("talent") or {}
+                spell_name = spell.get("name") or talent.get("name") or "?"
+                spell_id = spell.get("id")
+                if spell_id:
+                    spec_lines.append(f"`└──` **Talent:** [{spell_name}]({_wowhead_spell(spell_id)})")
+                else:
+                    spec_lines.append(f"`└──` **Talent:** {spell_name}")
 
         # Aktive Glyphen: aus specialization_groups is_active == true
         glyph_lines: List[str] = []
@@ -177,9 +204,14 @@ class TalentCheck(commands.Cog):
                 ephemeral=bool(ctx.interaction),
             )
 
+        description = "\n".join(spec_lines + ([""] if spec_lines and glyph_lines else []) + glyph_lines)
+        if len(description) > _MAX_DESC:
+            # Embed descriptions are limited to 4096 characters; cut at a line break.
+            cut = description.rfind("\n", 0, _MAX_DESC - 4)
+            description = description[: cut if cut > 0 else _MAX_DESC - 4].rstrip() + "\n…"
         embed = discord.Embed(
             title=f"{character.title()} – {realm.title()} ({region.upper()}) [{game.capitalize()}]",
-            description="\n".join(spec_lines + ([""] if spec_lines and glyph_lines else []) + glyph_lines),
+            description=description,
             color=await ctx.embed_color(),
         )
         ephemeral = private if ctx.interaction else False
@@ -189,10 +221,8 @@ class TalentCheck(commands.Cog):
     @talentcheck.autocomplete("realm")
     async def ac_realm(self, interaction: discord.Interaction, current: str):
         sel_region = getattr(interaction.namespace, "region", "") or "eu"
-        cur = (current or "").lower()
-        names = await fetch_realm_names(lambda r: _get_access_token(self, r), sel_region)
-        out = [n for n in names if not cur or cur in n.lower()]
-        return [app_commands.Choice(name=r, value=r) for r in out[:25]]
+        # Choice value = Blizzard realm slug, label = realm name.
+        return await realm_choices(lambda r: _get_access_token(self, r), sel_region, current)
 
     @talentcheck.autocomplete("locale")
     async def ac_locale(self, interaction: discord.Interaction, current: str):

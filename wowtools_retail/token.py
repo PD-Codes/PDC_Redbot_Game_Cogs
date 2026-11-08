@@ -8,6 +8,7 @@ from discord import app_commands
 from redbot.core import commands
 from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 
+from .blizzard_rest import reset_token_caches
 from .utils import format_to_gold
 
 _ = Translator("WoWTools", __file__)
@@ -89,16 +90,25 @@ async def _fetch_token_price(self, region: str, game: str = "retail", locale: st
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, headers=headers) as resp:
             js = await resp.json()
+            if resp.status == 401:
+                reset_token_caches(self)
             if resp.status != 200:
                 raise RuntimeError(f"API {resp.status}: {js}")
             return js
 
 
+def _can_embed(ctx: commands.Context) -> bool:
+    """Embed permission check that also works in DMs (ctx.guild is None)."""
+    if ctx.guild is None:
+        return True
+    return ctx.channel.permissions_for(ctx.guild.me).embed_links
+
+
 class Token:
     @commands.hybrid_command(name="wowt-wowtoken")
-    async def wowtoken(self, ctx: commands.Context, region: Literal["eu", "us", "kr", "tw"] = "eu"):
+    async def wowtoken(self, ctx: commands.Context, region: Literal["eu", "us", "kr", "tw", "all"] = "eu"):
         """Check price of WoW token in a region"""
-        if ctx.interaction:
+        if ctx.interaction and ctx.guild:
             # Workaround for Red locale on interactions
             await set_contextual_locales_from_guild(self.bot, ctx.guild)
 
@@ -125,7 +135,7 @@ class Token:
                 region=region.upper(), gold=format_to_gold(price_copper, gold_emotes)
             )
 
-            if ctx.channel.permissions_for(ctx.guild.me).embed_links:
+            if _can_embed(ctx):
                 embed = discord.Embed(description=message, colour=await ctx.embed_colour())
                 ts = data.get("last_updated_timestamp")
                 if ts:
@@ -159,7 +169,7 @@ class Token:
             except Exception as e:
                 embed.add_field(name=region.upper(), value=f"Error: {e}")
 
-        if ctx.channel.permissions_for(ctx.guild.me).embed_links:
+        if _can_embed(ctx):
             await ctx.send(embed=embed)
         else:
             msg = _("Current prices of the WoW Token in all regions:\n")

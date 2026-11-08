@@ -1,10 +1,14 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+import functools
 import html
+import io
 import json
+import logging
 import traceback
 import asyncio
 import time
+import weakref
 from datetime import datetime, timezone
 
 from discord.ext import tasks
@@ -28,12 +32,25 @@ except Exception:
                 return func
             return decorator
 
-from .automation.new_user import handle_new_member_onboarding
+from .automation.new_user import (
+    MANUAL_VERIFICATION_USES_DYNAMIC_ITEM,
+    ManualVerificationButton,
+    handle_manual_verification_click,
+    handle_new_member_onboarding,
+    parse_manual_verification_custom_id,
+)
 from .character_helpers import (
+    GAME_FOREVER,
     GAME_MOP,
     GAME_RETAIL,
+    char_display_name,
     char_tuple_key,
-    clear_main_for_game,
+    entry_key,
+    game_for_profile,
+    make_char_entry,
+    profile_is_complete,
+    profile_key_for_game,
+    role_assign_rejection,
     set_main_for_game,
     find_char_owner_guild_wide,
     format_char_line,
@@ -46,17 +63,12 @@ from .character_helpers import (
     merge_onboarding_character_into_linked,
     merge_rank_sync_game_state,
     normalize_linked_characters,
-    profile_key_to_link_game,
     set_linked_list,
     wow_profile_for_game,
 )
 from .officer_notifications import send_rank_lock_officer_notice, send_protected_rank_officer_notice
 from .character_ui import (
-    ADMIN_PANEL_INTRO,
     CharMainMenuView,
-    LinkedRemovePageView,
-    OfficerListMenuView,
-    PANEL_INTRO,
     SlashWowAdminSyncAllConfirmView,
     WowAdminCharPanelView,
     officer_can_manage_characters,
@@ -80,7 +92,7 @@ from .slash_modals import (
     SetRankTitleModal,
     SyncIntervalModal,
 )
-from .functions.automations import RankSyncService
+from .functions.automations import RankSyncService, _rank_mapping_for_profile
 from .functions.blizzard import BlizzardService
 from .pdc_dashboard import (
     dashboard_widget,
@@ -99,7 +111,7 @@ from .pdc_dashboard import (
 
 # Invisible sentinel prefix marking the "no main for a configured profile" report
 # (lets internal checks stay language-independent while output is localized).
-_NO_MAIN_MARKER = "​"
+_NO_MAIN_MARKER = "\u200b"  # zero-width space as an invisible sentinel (escaped on purpose)
 
 I18N = {
     "de-DE": {
@@ -157,11 +169,30 @@ I18N = {
 }
 
 
+log = logging.getLogger("red.wowguild_automation")
+
+
+def _guild_locked(func: Any) -> Any:
+    """Runs a dashboard submit/edit/delete handler under the per-guild config lock."""
+
+    @functools.wraps(func)
+    async def wrapper(self: Any, ctx: Any, *args: Any, **kwargs: Any) -> Any:
+        guild = getattr(ctx, "guild", None)
+        if guild is None:
+            return await func(self, ctx, *args, **kwargs)
+        async with self._guild_cfg_lock(guild.id):
+            return await func(self, ctx, *args, **kwargs)
+
+    return wrapper
+
+
 class WowGuildAutomation(commands.Cog):
     """WoW guild onboarding and role automation for Red."""
 
     # Minimum interval between officer notices for a locked in-game rank (auto-sync).
     RANK_LOCK_NOTICE_COOLDOWN_SEC = 6 * 3600
+    # Minimum interval between protected-rank officer notices per member + character.
+    PROTECTED_NOTICE_COOLDOWN_SEC = 24 * 3600
 
     def __init__(self, bot: Red) -> None:
         self.bot = bot
@@ -251,6 +282,108 @@ class WowGuildAutomation(commands.Cog):
         self.blizzard = BlizzardService()
         self.rank_sync = RankSyncService(self.blizzard)
         self._dashboard_attached = False
+        # Per-guild lock for guild-config read-modify-write; per-member lock for member data.
+        self._guild_locks: Dict[int, asyncio.Lock] = {}
+        self._member_locks: "weakref.WeakValueDictionary[Tuple[int, int], asyncio.Lock]" = (
+            weakref.WeakValueDictionary()
+        )
+        # Background tasks are referenced here (no GC mid-run) and cancelled on unload.
+        self._bg_tasks: Set[asyncio.Task] = set()
+
+    def _guild_cfg_lock(self, guild_id: int) -> asyncio.Lock:
+        """Lock for every read-modify-write of the guild config (and character ownership checks)."""
+        gid = int(guild_id)
+        lock = self._guild_locks.get(gid)
+        if lock is None:
+            lock = self._guild_locks[gid] = asyncio.Lock()
+        return lock
+
+    def _member_lock(self, guild_id: int, member_id: int) -> asyncio.Lock:
+        """Lock for member data writes. Never acquire the guild lock while holding this one."""
+        key = (int(guild_id), int(member_id))
+        lock = self._member_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._member_locks[key] = lock
+        return lock
+
+    def _spawn(self, coro: Any) -> "asyncio.Task":
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
+    @staticmethod
+    def _dashboard_actor(ctx: Any) -> Optional[discord.Member]:
+        """Member behind a dashboard request (None e.g. for a bot owner who is not on the server)."""
+        guild = getattr(ctx, "guild", None)
+        user = getattr(ctx, "user", None) or getattr(ctx, "author", None)
+        uid = getattr(user, "id", None)
+        if guild is None or uid is None:
+            return None
+        try:
+            return guild.get_member(int(uid))
+        except (TypeError, ValueError):
+            return None
+
+    def _role_save_rejection(
+        self, guild: discord.Guild, actor: Optional[discord.Member], role_id: int
+    ) -> Optional[str]:
+        if not role_id:
+            return None
+        role = guild.get_role(int(role_id))
+        is_owner = actor is not None and int(actor.id) == int(getattr(guild, "owner_id", 0) or 0)
+        return role_assign_rejection(role, actor=actor, bot_member=guild.me, actor_is_owner=is_owner)
+
+    @staticmethod
+    def _role_rejection_text(guild: discord.Guild, role_id: int, reason: str, lang: str) -> str:
+        role = guild.get_role(int(role_id)) if role_id else None
+        name = f"@{role.name}" if role is not None else f"`{role_id}`"
+        texts = {
+            "not_found": ("Rolle nicht gefunden", "role not found"),
+            "everyone": ("@everyone ist nicht erlaubt", "@everyone is not allowed"),
+            "managed": ("wird von einer Integration verwaltet", "is managed by an integration"),
+            "administrator": ("hat Administrator-Rechte", "has administrator permission"),
+            "above_bot": ("liegt nicht unter der Bot-Rolle", "is not below the bot's role"),
+            "above_actor": ("liegt nicht unter deiner höchsten Rolle", "is not below your highest role"),
+        }
+        de, en = texts.get(reason, (reason, reason))
+        return f"{name}: " + tr_lang(lang, de, en)
+
+    def _check_role_for_save(
+        self, guild: discord.Guild, actor: Optional[discord.Member], role_id: int, lang: str
+    ) -> Optional[str]:
+        """None if the role may be stored for automatic assignment, otherwise a localized reason."""
+        reason = self._role_save_rejection(guild, actor, role_id)
+        return None if reason is None else self._role_rejection_text(guild, role_id, reason, lang)
+
+    def _filter_role_changes(
+        self,
+        guild: discord.Guild,
+        actor: Optional[discord.Member],
+        changes: Dict[str, Tuple[Any, Any]],
+        lang: str,
+    ) -> Tuple[Dict[str, int], List[str]]:
+        """changes: key -> (new_id, current_id). Changed ids are checked; rejected ones keep the current id."""
+        accepted: Dict[str, int] = {}
+        rejected: List[str] = []
+        for key, (new_raw, cur_raw) in changes.items():
+            try:
+                new_id = int(new_raw or 0)
+            except (TypeError, ValueError):
+                new_id = 0
+            try:
+                cur_id = int(cur_raw or 0)
+            except (TypeError, ValueError):
+                cur_id = 0
+            if new_id and new_id != cur_id:
+                msg = self._check_role_for_save(guild, actor, new_id, lang)
+                if msg:
+                    rejected.append(msg)
+                    accepted[key] = cur_id
+                    continue
+            accepted[key] = new_id
+        return accepted, rejected
 
     def _attach_to_dashboard(self, dashboard_cog: commands.Cog) -> bool:
         try:
@@ -281,6 +414,12 @@ class WowGuildAutomation(commands.Cog):
                 self._rank_auto_sync_loop.start()
         except Exception:
             pass
+        # Persistent manual-verification buttons (custom_id carries guild + member id).
+        if ManualVerificationButton is not None and hasattr(self.bot, "add_dynamic_items"):
+            try:
+                self.bot.add_dynamic_items(ManualVerificationButton)
+            except Exception:
+                log.exception("Could not register persistent manual-verification buttons")
         register_dashboard(self)
 
     async def cog_unload(self) -> None:
@@ -289,6 +428,14 @@ class WowGuildAutomation(commands.Cog):
             self._rank_auto_sync_loop.cancel()
         except Exception:
             pass
+        if ManualVerificationButton is not None and hasattr(self.bot, "remove_dynamic_items"):
+            try:
+                self.bot.remove_dynamic_items(ManualVerificationButton)
+            except Exception:
+                pass
+        for task in list(self._bg_tasks):
+            task.cancel()
+        self._bg_tasks.clear()
         dashboard_cog = self._get_dashboard_cog()
         if dashboard_cog is not None:
             try:
@@ -302,14 +449,35 @@ class WowGuildAutomation(commands.Cog):
         for guild_id in (await self.config.all_members()).keys():
             await self.config.member_from_ids(guild_id, user_id).clear()
 
-    async def red_get_data_for_user(self, *, user_id: int) -> dict:
-        """Return all stored member data for the user (per guild)."""
-        data = {}
+    async def red_get_data_for_user(self, *, user_id: int) -> Dict[str, io.BytesIO]:
+        """Return all stored member data for the user (per guild) as a JSON file."""
+        data: Dict[str, Any] = {}
         all_members = await self.config.all_members()
         for guild_id, members in all_members.items():
-            if user_id in members:
-                data[str(guild_id)] = members[user_id]
-        return data
+            payload = members.get(user_id)
+            if payload is None:
+                payload = members.get(str(user_id))
+            if payload is not None:
+                data[str(guild_id)] = payload
+        if not data:
+            return {}
+        return {
+            "wowguild_automation.json": io.BytesIO(
+                json.dumps(data, default=str, indent=2, ensure_ascii=False).encode("utf-8")
+            )
+        }
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Fallback for discord.py < 2.4 (no DynamicItem): persistent manual-verification buttons."""
+        if MANUAL_VERIFICATION_USES_DYNAMIC_ITEM:
+            return
+        if interaction.type != discord.InteractionType.component:
+            return
+        parsed = parse_manual_verification_custom_id((interaction.data or {}).get("custom_id"))
+        if parsed is None or interaction.response.is_done():
+            return
+        await handle_manual_verification_click(self, interaction, *parsed)
 
     @commands.Cog.listener()
     async def on_cog_add(self, cog: commands.Cog) -> None:
@@ -347,7 +515,8 @@ class WowGuildAutomation(commands.Cog):
                 ),
                 Field.select(
                     "default_version", "Default version",
-                    [{"value": "retail", "label": "Retail"}, {"value": "classic", "label": "Classic"}],
+                    [{"value": "retail", "label": "Retail"}, {"value": "classic", "label": "Classic"},
+                     {"value": "forever", "label": "WoW Forever"}],
                     value=s.get("default_version", "retail"),
                 ),
                 Field.text("default_language", "Default language", value=s.get("default_language", "en-US")),
@@ -380,6 +549,7 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_allied_add_panel.on_submit
+    @_guild_locked
     async def _wga_allied_add(self, ctx, data):
         name = str(data.get("guild_name", "")).strip()
         if not name:
@@ -401,6 +571,7 @@ class WowGuildAutomation(commands.Cog):
         return [{"id": str(g), "cells": {"guild": str(g)}} for g in (guilds or [])]
 
     @wga_allied_list.on_delete
+    @_guild_locked
     async def _wga_allied_delete(self, ctx, item_id):
         async with self.config.guild(ctx.guild).allied_guilds() as gl:
             matches = [g for g in gl if str(g) == str(item_id)]
@@ -463,6 +634,7 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_switch_panel.on_submit
+    @_guild_locked
     async def _wga_switch_submit(self, ctx, data):
         profiles = await self.config.guild(ctx.guild).wow_profiles()
         if not isinstance(profiles, dict):
@@ -493,6 +665,7 @@ class WowGuildAutomation(commands.Cog):
             {"value": "classic_era", "label": "Classic Era"},
             {"value": "mop_classic", "label": "MoP Classic"},
             {"value": "sod", "label": "SoD"},
+            {"value": "forever", "label": "WoW Forever"},
         ]
         return PanelSchema(
             description=tr(ctx,
@@ -513,12 +686,18 @@ class WowGuildAutomation(commands.Cog):
                 ),
                 Field.text("region", "Region", value=str(active.get("region", "eu"))),
                 Field.select("version", "Version", version_options, value=str(active.get("version", "retail"))),
-                Field.text("realm", "Realm", value=str(active.get("realm", ""))),
+                Field.text(
+                    "realm", "Realm", value=str(active.get("realm", "")),
+                    description=tr(ctx,
+                                   "WoW Forever hat keine Realms – Feld leer lassen.",
+                                   "WoW Forever has no realms – leave this empty."),
+                ),
                 Field.text("guild_name", "Guild name", value=str(active.get("guild_name", ""))),
             ],
         )
 
     @wga_profile_panel.on_submit
+    @_guild_locked
     async def _wga_profile_submit(self, ctx, data):
         await self.config.guild(ctx.guild).language.set(str(data.get("language", "en-US")).strip() or "en-US")
         new_key = str(data.get("new_profile_key", "")).strip()
@@ -595,6 +774,7 @@ class WowGuildAutomation(commands.Cog):
             {"value": "classic_era", "label": "Classic Era"},
             {"value": "mop_classic", "label": "MoP Classic"},
             {"value": "sod", "label": "SoD"},
+            {"value": "forever", "label": "WoW Forever"},
         ]
         return PanelSchema(
             description=tr(ctx, f"Profil '{item_id}' bearbeiten.", f"Edit profile '{item_id}'."),
@@ -602,12 +782,18 @@ class WowGuildAutomation(commands.Cog):
                 Field.switch("active", "Set as active profile", value=(str(item_id) == active)),
                 Field.text("region", "Region", value=str(p.get("region", "eu"))),
                 Field.select("version", "Version", version_options, value=str(p.get("version", "retail"))),
-                Field.text("realm", "Realm", value=str(p.get("realm", ""))),
+                Field.text(
+                    "realm", "Realm", value=str(p.get("realm", "")),
+                    description=tr(ctx,
+                                   "WoW Forever hat keine Realms – Feld leer lassen.",
+                                   "WoW Forever has no realms – leave this empty."),
+                ),
                 Field.text("guild_name", "Guild name", value=str(p.get("guild_name", ""))),
             ],
         )
 
     @wga_profiles_list.on_edit
+    @_guild_locked
     async def _wga_profiles_edit(self, ctx, item_id, data):
         async with self.config.guild(ctx.guild).wow_profiles() as profiles:
             if not isinstance(profiles, dict):
@@ -629,6 +815,7 @@ class WowGuildAutomation(commands.Cog):
         return SubmitResult.ok("Profil aktualisiert.")
 
     @wga_profiles_list.on_delete
+    @_guild_locked
     async def _wga_profiles_delete(self, ctx, item_id):
         key = str(item_id)
         async with self.config.guild(ctx.guild).wow_profiles() as profiles:
@@ -696,17 +883,34 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_onboarding_cfg_panel.on_submit
+    @_guild_locked
     async def _wga_onboarding_cfg_submit(self, ctx, data):
         async with self.config.guild(ctx.guild).onboarding() as ob:
             if not isinstance(ob, dict):
                 ob.clear()
             ob["welcome_text_de"] = str(data.get("welcome_text_de", "")).strip()
             ob["welcome_text_en"] = str(data.get("welcome_text_en", "")).strip()
+        lang = await self._guild_lang(ctx.guild)
+        actor = self._dashboard_actor(ctx)
         async with self.config.guild(ctx.guild).roles() as rl:
             if not isinstance(rl, dict):
                 rl.clear()
-            rl["onboarding_new_role_id"] = int(data["onboarding_new_role"]) if str(data.get("onboarding_new_role", "")).strip() else 0
-            rl["onboarding_complete_role_id"] = int(data["onboarding_complete_role"]) if str(data.get("onboarding_complete_role", "")).strip() else 0
+            accepted, rejected = self._filter_role_changes(
+                ctx.guild,
+                actor,
+                {
+                    "onboarding_new_role_id": (
+                        int(data["onboarding_new_role"]) if str(data.get("onboarding_new_role", "")).strip() else 0,
+                        rl.get("onboarding_new_role_id", 0),
+                    ),
+                    "onboarding_complete_role_id": (
+                        int(data["onboarding_complete_role"]) if str(data.get("onboarding_complete_role", "")).strip() else 0,
+                        rl.get("onboarding_complete_role_id", 0),
+                    ),
+                },
+                lang,
+            )
+            rl.update(accepted)
         async with self.config.guild(ctx.guild).channels() as ch:
             if not isinstance(ch, dict):
                 ch.clear()
@@ -715,6 +919,11 @@ class WowGuildAutomation(commands.Cog):
             if not isinstance(ft, dict):
                 ft.clear()
             ft["onboarding"] = bool(data.get("feature_onboarding", False))
+        if rejected:
+            return SubmitResult.fail(
+                tr(ctx, "Gespeichert, aber Rolle(n) abgelehnt (alter Wert bleibt): ",
+                   "Saved, but role(s) rejected (previous value kept): ") + "; ".join(rejected)
+            )
         return SubmitResult.ok("Onboarding-Einstellungen gespeichert.")
 
     # --- Guild panel: rules ---------------------------------------------- #
@@ -738,6 +947,7 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_rules_panel.on_submit
+    @_guild_locked
     async def _wga_rules_submit(self, ctx, data):
         async with self.config.guild(ctx.guild).rules() as rules:
             if not isinstance(rules, dict):
@@ -793,13 +1003,23 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_roles_panel.on_submit
+    @_guild_locked
     async def _wga_roles_submit(self, ctx, data):
+        lang = await self._guild_lang(ctx.guild)
+        actor = self._dashboard_actor(ctx)
         async with self.config.guild(ctx.guild).roles() as rl:
             if not isinstance(rl, dict):
                 rl.clear()
-            rl["guest_role_id"] = int(data["guest_role"]) if str(data.get("guest_role", "")).strip() else 0
-            rl["member_role_id"] = int(data["member_role"]) if str(data.get("member_role", "")).strip() else 0
-            rl["allied_role_id"] = int(data["allied_role"]) if str(data.get("allied_role", "")).strip() else 0
+            changes = {}
+            for field_key, cfg_key in (
+                ("guest_role", "guest_role_id"),
+                ("member_role", "member_role_id"),
+                ("allied_role", "allied_role_id"),
+            ):
+                new_id = int(data[field_key]) if str(data.get(field_key, "")).strip() else 0
+                changes[cfg_key] = (new_id, rl.get(cfg_key, 0))
+            accepted, rejected = self._filter_role_changes(ctx.guild, actor, changes, lang)
+            rl.update(accepted)
         async with self.config.guild(ctx.guild).features() as ft:
             if not isinstance(ft, dict):
                 ft.clear()
@@ -807,6 +1027,11 @@ class WowGuildAutomation(commands.Cog):
             ft["sync_rank"] = bool(data.get("feature_sync_rank", False))
             ft["auto_verify"] = bool(data.get("feature_auto_verify", False))
             ft["ready_times"] = bool(data.get("feature_ready_times", False))
+        if rejected:
+            return SubmitResult.fail(
+                tr(ctx, "Gespeichert, aber Rolle(n) abgelehnt (alter Wert bleibt): ",
+                   "Saved, but role(s) rejected (previous value kept): ") + "; ".join(rejected)
+            )
         return SubmitResult.ok("Rollen & Features gespeichert.")
 
     # --- Guild panel: channels ------------------------------------------- #
@@ -849,6 +1074,7 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_channels_panel.on_submit
+    @_guild_locked
     async def _wga_channels_submit(self, ctx, data):
         mapping = {
             "manual_review_channel": "manual_review_channel_id",
@@ -928,6 +1154,7 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_templates_panel.on_submit
+    @_guild_locked
     async def _wga_templates_submit(self, ctx, data):
         keys = [
             "duplicate_character_message",
@@ -1011,11 +1238,29 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_rank_mapping_list.on_edit
+    @_guild_locked
     async def _wga_rank_mapping_edit(self, ctx, item_id, data):
         prof = await self._wga_active_profile(ctx)
         idx = str(item_id)
         new_title = str(data.get("title", "")).strip() or f"Rank {idx}"
         role_id = int(data["role"]) if str(data.get("role", "")).strip() else 0
+        if role_id:
+            tb_cur = await self.config.guild(ctx.guild).rank_titles_by_profile()
+            mb_cur = await self.config.guild(ctx.guild).rank_mapping_by_profile()
+            t_cur = tb_cur.get(prof) if isinstance(tb_cur, dict) else None
+            m_cur = mb_cur.get(prof) if isinstance(mb_cur, dict) else None
+            t_cur = t_cur if isinstance(t_cur, dict) else {}
+            m_cur = m_cur if isinstance(m_cur, dict) else {}
+            try:
+                cur_rid = int(m_cur.get(str(t_cur.get(idx, f"Rank {idx}")), 0) or 0)
+            except (TypeError, ValueError):
+                cur_rid = 0
+            if role_id != cur_rid:
+                rejected = self._check_role_for_save(
+                    ctx.guild, self._dashboard_actor(ctx), role_id, await self._guild_lang(ctx.guild)
+                )
+                if rejected:
+                    return SubmitResult.fail(tr(ctx, f"Rolle abgelehnt — {rejected}", f"Role rejected — {rejected}"))
         async with self.config.guild(ctx.guild).rank_titles_by_profile() as titles_by:
             if not isinstance(titles_by, dict):
                 titles_by.clear()
@@ -1042,6 +1287,7 @@ class WowGuildAutomation(commands.Cog):
         return SubmitResult.ok("Rank-Mapping gespeichert.")
 
     @wga_rank_mapping_list.on_delete
+    @_guild_locked
     async def _wga_rank_mapping_delete(self, ctx, item_id):
         prof = await self._wga_active_profile(ctx)
         idx = str(item_id)
@@ -1074,8 +1320,25 @@ class WowGuildAutomation(commands.Cog):
             protected = []
         if not isinstance(locked, list):
             locked = []
+        gm_hint = ""
+        if not [x for x in protected if str(x).strip()]:
+            # Hint: rank 0 (guild master) is mapped to a Discord role but nothing is protected.
+            cfg_all = await self.config.guild(ctx.guild).all()
+            prof_map = _rank_mapping_for_profile(cfg_all, prof)
+            titles_by = cfg_all.get("rank_titles_by_profile") or {}
+            prof_titles = titles_by.get(prof) if isinstance(titles_by, dict) else None
+            prof_titles = prof_titles if isinstance(prof_titles, dict) else {}
+            title0 = str(prof_titles.get("0", "Rank 0"))
+            if prof_map.get(title0) or prof_map.get("Rank 0"):
+                gm_hint = tr(
+                    ctx,
+                    " \u26a0 Rang 0 (Gildenmeister) ist gemappt, aber es sind keine geschützten Ränge gesetzt. "
+                    "Empfehlung: GM- und Offiziersränge hier schützen (z. B. „0“ und „1“).",
+                    " \u26a0 Rank 0 (guild master) is mapped, but no protected ranks are set. "
+                    "Recommendation: protect GM and officer ranks here (e.g. “0” and “1”).",
+                )
         return PanelSchema(
-            description=tr(ctx, f"Geschützte und gesperrte Ränge (aktives Profil {prof}). Ein Eintrag pro Zeile.", f"Protected and locked ranks (active profile {prof}). One entry per line."),
+            description=tr(ctx, f"Geschützte und gesperrte Ränge (aktives Profil {prof}). Ein Eintrag pro Zeile.", f"Protected and locked ranks (active profile {prof}). One entry per line.") + gm_hint,
             fields=[
                 Field.textarea(
                     "protected_list", "Protected ranks",
@@ -1089,6 +1352,7 @@ class WowGuildAutomation(commands.Cog):
         )
 
     @wga_protected_lock_panel.on_submit
+    @_guild_locked
     async def _wga_protected_lock_submit(self, ctx, data):
         prof = await self._wga_active_profile(ctx)
         protected = [s.strip() for s in str(data.get("protected_list", "")).splitlines() if s.strip()]
@@ -1146,7 +1410,8 @@ class WowGuildAutomation(commands.Cog):
             version_key = wow_single.get("version", "retail") or "retail"
             wow_profiles = {version_key: wow_single}
             cfg["wow_profiles"] = wow_profiles
-            await self.config.guild(guild).set(cfg)
+            # Only write the migrated field (no whole-config overwrite -> no lost updates).
+            await self.config.guild(guild).wow_profiles.set(wow_profiles)
         return cfg
 
     async def _lang(self, ctx: commands.Context) -> str:
@@ -1223,12 +1488,14 @@ class WowGuildAutomation(commands.Cog):
             "Dieser Charakter ist bereits verknüpft ({detail})",
         )
         prof = await wow_profile_for_game(cfg, game_type)
-        if not prof or not prof.get("realm") or not prof.get("guild_name"):
+        if not profile_is_complete(prof):
             return (
                 tr_lang(
                     lang,
-                    f"Profil für **{game_label(game_type)}** ist unvollständig (Realm/Gilde im Dashboard setzen).",
-                    f"Profile for **{game_label(game_type)}** is incomplete (set realm/guild in the dashboard).",
+                    f"Profil für **{game_label(game_type)}** ist unvollständig (Realm/Gilde im Dashboard setzen; "
+                    "WoW Forever braucht keinen Realm).",
+                    f"Profile for **{game_label(game_type)}** is incomplete (set realm/guild in the dashboard; "
+                    "WoW Forever needs no realm).",
                 ),
                 False,
             )
@@ -1238,50 +1505,62 @@ class WowGuildAutomation(commands.Cog):
             prof.get("realm", ""),
             prof.get("guild_name", ""),
         )
-        roster_l = {n.lower() for n in roster}
-        linked = await get_linked_list(self.config.member(member))
-        to_add: List[Dict[str, str]] = []
-        for raw_name in names:
-            name = (raw_name or "").strip()
-            if not name:
-                continue
-            if name.lower() not in roster_l:
-                return (
-                    tr_lang(
-                        lang,
-                        f"`{name}` ist im **{game_label(game_type)}**-Gildenroster nicht (oder API-Fehler).",
-                        f"`{name}` is not in the **{game_label(game_type)}** guild roster (or API error).",
-                    ),
-                    False,
-                )
-            key = char_tuple_key(name, game_type)
-            owner = await find_char_owner_guild_wide(
-                self.config, guild, name, game_type, exclude_user_id=member.id
-            )
-            if owner is not None:
-                return (
-                    dup_tpl.format(
-                        detail=tr_lang(
-                            lang,
-                            f"bereits mit <@{owner}> verknüpft",
-                            f"already linked to <@{owner}>",
+        # Lookup by uniqueness key: lowercased name (Retail/MoP) or "name-surname" (WoW Forever).
+        roster_by_key = {char_tuple_key(n, game_type)[0]: n for n in roster}
+        # Ownership check + write under the guild lock: two members linking the same
+        # character at the same time must not both succeed.
+        async with self._guild_cfg_lock(guild.id):
+            async with self._member_lock(guild.id, member.id):
+                linked = await get_linked_list(self.config.member(member))
+                to_add: List[Dict[str, str]] = []
+                for raw_name in names:
+                    name = (raw_name or "").strip()
+                    if not name:
+                        continue
+                    rkey = char_tuple_key(name, game_type)[0]
+                    if rkey not in roster_by_key:
+                        hint = ""
+                        if game_type == GAME_FOREVER:
+                            hint = tr_lang(lang, " WoW Forever: Vor- und Nachname angeben.", " WoW Forever: enter first name and surname.")
+                        return (
+                            tr_lang(
+                                lang,
+                                f"`{name}` ist im **{game_label(game_type)}**-Gildenroster nicht (oder API-Fehler).",
+                                f"`{name}` is not in the **{game_label(game_type)}** guild roster (or API error).",
+                            ) + hint,
+                            False,
                         )
-                    ),
-                    False,
-                )
-            if any(char_tuple_key(e["name"], e["game_type"]) == key for e in linked):
-                return (
-                    dup_tpl.format(
-                        detail=tr_lang(lang, "bereits bei dir verknüpft", "already linked to you")
-                    ),
-                    False,
-                )
-            if any(char_tuple_key(e["name"], e["game_type"]) == key for e in to_add):
-                continue
-            to_add.append({"name": name, "game_type": game_type})
-        merged = linked + to_add
-        await set_linked_list(self.config.member(member), merged)
-        labels = ", ".join(f"{x['name']} ({game_label(x['game_type'])})" for x in to_add)
+                    if game_type == GAME_FOREVER:
+                        # Use the roster spelling "Name Surname".
+                        name = roster_by_key[rkey]
+                    key = char_tuple_key(name, game_type)
+                    owner = await find_char_owner_guild_wide(
+                        self.config, guild, name, game_type, exclude_user_id=member.id
+                    )
+                    if owner is not None:
+                        return (
+                            dup_tpl.format(
+                                detail=tr_lang(
+                                    lang,
+                                    f"bereits mit <@{owner}> verknüpft",
+                                    f"already linked to <@{owner}>",
+                                )
+                            ),
+                            False,
+                        )
+                    if any(entry_key(e) == key for e in linked):
+                        return (
+                            dup_tpl.format(
+                                detail=tr_lang(lang, "bereits bei dir verknüpft", "already linked to you")
+                            ),
+                            False,
+                        )
+                    if any(entry_key(e) == key for e in to_add):
+                        continue
+                    to_add.append(make_char_entry(name, game_type))
+                merged = linked + to_add
+                await set_linked_list(self.config.member(member), merged)
+        labels = ", ".join(f"{char_display_name(x)} ({game_label(x['game_type'])})" for x in to_add)
         if labels:
             return (tr_lang(lang, f"Verknüpft: {labels}", f"Linked: {labels}"), True)
         return (tr_lang(lang, "Nichts hinzugefügt.", "Nothing added."), True)
@@ -1294,94 +1573,89 @@ class WowGuildAutomation(commands.Cog):
         self,
         member: discord.Member,
         guild: discord.Guild,
-        profile_key: str,
+        game: str,
         main_name: str,
     ):
+        """
+        Rank sync for the main of one game (retail / mop_classic / forever).
+
+        The wow profile is resolved by its version. Protected / rank-lock checks run inside
+        plan_sync BEFORE any role is assigned; on a hit no role is given and the officers get
+        a notice (with cooldown). Serialized per member; state is stored under the game key.
+        Returns (rank_title, reason, role_id).
+        """
         cfg = await self._guild_config(guild)
         profiles = cfg.get("wow_profiles") or {}
-        if profile_key not in profiles:
+        profile_key = profile_key_for_game(cfg, game)
+        if profile_key is None or profile_key not in profiles:
             return None, "no_profile", 0
         selected_cfg = dict(cfg)
         selected_cfg["wow"] = profiles.get(profile_key, {})
+        char_name = main_name.strip()
         conf = self.config.member(member)
-        raw = await conf.rank_sync_by_game()
-        prev_rid = 0
-        if isinstance(raw, dict):
-            st = raw.get(profile_key)
-            if isinstance(st, dict):
-                try:
-                    prev_rid = int(st.get("last_role_id") or 0)
-                except (TypeError, ValueError):
-                    prev_rid = 0
-        rank_title, reason, role_id = await self.rank_sync.sync_member_rank(
-            member,
-            selected_cfg,
-            main_name.strip(),
-            profile_key=profile_key,
-            previous_bot_role_id=prev_rid,
-        )
-        if reason == "rank_locked" and rank_title:
-            await merge_rank_sync_game_state(
-                conf,
-                profile_key,
-                last_title=str(rank_title),
-            )
-            raw_rs = await conf.rank_sync_by_game()
-            st = (raw_rs.get(profile_key) or {}) if isinstance(raw_rs, dict) else {}
-            last_n = float(st.get("rank_lock_notice_ts") or st.get("manual_lock_notice_ts") or 0)
-            now = time.time()
-            if (now - last_n) >= self.RANK_LOCK_NOTICE_COOLDOWN_SEC:
-                await send_rank_lock_officer_notice(
-                    guild,
-                    cfg,
-                    member,
-                    profile_key,
-                    main_name.strip(),
-                    rank_title,
-                )
-                await merge_rank_sync_game_state(
-                    conf,
-                    profile_key,
-                    rank_lock_notice_ts=now,
-                )
-        elif reason == "protected" and rank_title:
-            await merge_rank_sync_game_state(
-                conf,
-                profile_key,
-                last_title=str(rank_title),
-            )
-            await send_protected_rank_officer_notice(
-                guild,
-                cfg,
+        notice: Optional[str] = None
+        async with self._member_lock(guild.id, member.id):
+            raw = await conf.rank_sync_by_game()
+            st = raw.get(game) if isinstance(raw, dict) else None
+            if not isinstance(st, dict):
+                st = {}
+            try:
+                prev_rid = int(st.get("last_role_id") or 0)
+            except (TypeError, ValueError):
+                prev_rid = 0
+            rank_title, reason, role_id = await self.rank_sync.sync_member_rank(
                 member,
-                profile_key,
-                main_name.strip(),
-                rank_title,
+                selected_cfg,
+                char_name,
+                profile_key=profile_key,
+                previous_bot_role_id=prev_rid,
             )
+            now = time.time()
+            if reason == "ok" and rank_title and role_id:
+                await merge_rank_sync_game_state(
+                    conf, game, last_title=str(rank_title), last_role_id=int(role_id)
+                )
+            elif reason == "rank_locked" and rank_title:
+                await merge_rank_sync_game_state(conf, game, last_title=str(rank_title))
+                try:
+                    last_n = float(st.get("rank_lock_notice_ts") or st.get("manual_lock_notice_ts") or 0)
+                except (TypeError, ValueError):
+                    last_n = 0.0
+                if (now - last_n) >= self.RANK_LOCK_NOTICE_COOLDOWN_SEC:
+                    notice = "rank_locked"
+                    await merge_rank_sync_game_state(conf, game, rank_lock_notice_ts=now)
+            elif reason == "protected" and rank_title:
+                await merge_rank_sync_game_state(conf, game, last_title=str(rank_title))
+                char_key = char_tuple_key(char_name, game)[0]
+                try:
+                    last_p = float(st.get("protected_notice_ts") or 0)
+                except (TypeError, ValueError):
+                    last_p = 0.0
+                same_char = str(st.get("protected_notice_key") or "") == char_key
+                if not same_char or (now - last_p) >= self.PROTECTED_NOTICE_COOLDOWN_SEC:
+                    notice = "protected"
+                    await merge_rank_sync_game_state(
+                        conf, game, protected_notice_ts=now, protected_notice_key=char_key
+                    )
+        if notice == "rank_locked":
+            await send_rank_lock_officer_notice(guild, cfg, member, profile_key, char_name, rank_title)
+        elif notice == "protected":
+            await send_protected_rank_officer_notice(guild, cfg, member, profile_key, char_name, rank_title)
         return rank_title, reason, role_id
 
     async def _schedule_rank_sync_after_main(
         self,
         guild: discord.Guild,
         member: discord.Member,
-        profile_key: str,
+        game: str,
         main_name: str,
     ) -> None:
         try:
             if not await self._guild_has_sync_rank(guild):
                 return
-            rank_title, reason, role_id = await self._sync_rank_for_main(
-                member, guild, profile_key, main_name
-            )
-            if reason == "ok" and rank_title and role_id:
-                await merge_rank_sync_game_state(
-                    self.config.member(member),
-                    profile_key,
-                    last_title=str(rank_title),
-                    last_role_id=int(role_id),
-                )
+            await self._sync_rank_for_main(member, guild, game, main_name)
         except Exception:
-            pass
+            log.exception("Rank sync after setting a main failed (member %s)", member.id)
 
     async def _slash_admin_sync_report_for_member(
         self,
@@ -1396,16 +1670,16 @@ class WowGuildAutomation(commands.Cog):
                 "Rank sync is disabled on this server (`features.sync_rank`).",
             )
         cfg = await self._guild_config(guild)
-        wow_profiles = cfg.get("wow_profiles") or {}
         main_map = await get_main_characters(self.config.member(member))
-        conf = self.config.member(member)
         jobs: List[tuple[str, str]] = []
-        for g in (GAME_RETAIL, GAME_MOP):
-            if g not in wow_profiles:
+        for g in (GAME_RETAIL, GAME_MOP, GAME_FOREVER):
+            # Profile is matched by version (key only as fallback).
+            if profile_key_for_game(cfg, g) is None:
                 continue
             m = main_map.get(g)
             if m and str(m.get("name", "")).strip():
-                jobs.append((g, str(m["name"]).strip()))
+                # WoW Forever: "Name Surname" (first name alone is not unique).
+                jobs.append((g, char_display_name(m)))
         if not jobs:
             return _NO_MAIN_MARKER + tr_lang(
                 lang,
@@ -1417,12 +1691,6 @@ class WowGuildAutomation(commands.Cog):
             rank_title, reason, role_id = await self._sync_rank_for_main(member, guild, game, name)
             gl = game_label(game)
             if reason == "ok" and rank_title and role_id:
-                await merge_rank_sync_game_state(
-                    conf,
-                    game,
-                    last_title=str(rank_title),
-                    last_role_id=int(role_id),
-                )
                 lines.append(tr_lang(
                     lang,
                     f"• **{gl}:** `{rank_title}` synchronisiert.",
@@ -1464,6 +1732,12 @@ class WowGuildAutomation(commands.Cog):
                     f"• **{gl}:** Discord-API-Fehler.",
                     f"• **{gl}:** Discord API error.",
                 ))
+            elif reason == "unsafe_role":
+                lines.append(tr_lang(
+                    lang,
+                    f"• **{gl}:** gemappte Rolle hat Administrator-Rechte / ist verwaltet — wird nie automatisch vergeben.",
+                    f"• **{gl}:** mapped role has administrator permission / is managed — never assigned automatically.",
+                ))
             else:
                 lines.append(f"• **{gl}:** {reason}")
         return tr_lang(
@@ -1487,7 +1761,7 @@ class WowGuildAutomation(commands.Cog):
             except (TypeError, ValueError):
                 continue
             mem = guild.get_member(uid)
-            if mem is None:
+            if mem is None or mem.bot:
                 continue
             linked = normalize_linked_characters(payload.get("linked_characters") or payload.get("chars"))
             if not linked:
@@ -1495,7 +1769,7 @@ class WowGuildAutomation(commands.Cog):
             main_map = mains_from_member_data(payload)
             has_main = any(
                 main_map.get(g) and str((main_map.get(g) or {}).get("name", "")).strip()
-                for g in (GAME_RETAIL, GAME_MOP)
+                for g in (GAME_RETAIL, GAME_MOP, GAME_FOREVER)
             )
             if not has_main:
                 continue
@@ -1527,7 +1801,7 @@ class WowGuildAutomation(commands.Cog):
             except (TypeError, ValueError):
                 continue
             mem = guild.get_member(uid)
-            if mem is None:
+            if mem is None or mem.bot:
                 continue
             linked = normalize_linked_characters(
                 payload.get("linked_characters") or payload.get("chars")
@@ -1537,13 +1811,15 @@ class WowGuildAutomation(commands.Cog):
             main_map = mains_from_member_data(payload)
             has_main = any(
                 main_map.get(g) and str((main_map.get(g) or {}).get("name", "")).strip()
-                for g in (GAME_RETAIL, GAME_MOP)
+                for g in (GAME_RETAIL, GAME_MOP, GAME_FOREVER)
             )
             if not has_main:
                 continue
-            report = await self._slash_admin_sync_report_for_member(guild, mem)
-            if report.startswith(_NO_MAIN_MARKER):
-                continue
+            try:
+                await self._slash_admin_sync_report_for_member(guild, mem)
+            except Exception:
+                # One broken member must not abort the whole background run.
+                log.exception("Background rank sync failed for member %s", uid)
 
     async def _maybe_auto_rank_sync_guild(self, guild: discord.Guild) -> None:
         cfg = await self.config.guild(guild).all()
@@ -1561,8 +1837,11 @@ class WowGuildAutomation(commands.Cog):
             return
         if (now - last) < mins * 60:
             return
-        await self._background_rank_sync_guild_members(guild)
-        await self.config.guild(guild).rank_sync_last_run_epoch.set(time.time())
+        try:
+            await self._background_rank_sync_guild_members(guild)
+        finally:
+            # Always record the run, otherwise a failing run would restart every minute.
+            await self.config.guild(guild).rank_sync_last_run_epoch.set(time.time())
 
     @tasks.loop(minutes=1)
     async def _rank_auto_sync_loop(self) -> None:
@@ -1570,7 +1849,7 @@ class WowGuildAutomation(commands.Cog):
             try:
                 await self._maybe_auto_rank_sync_guild(guild)
             except Exception:
-                pass
+                log.exception("Auto rank sync failed for guild %s", guild.id)
 
     @_rank_auto_sync_loop.before_loop
     async def _rank_auto_sync_before_loop(self) -> None:
@@ -1710,7 +1989,7 @@ class WowGuildAutomation(commands.Cog):
         linked = await get_linked_list(self.config.member(member))
         mains_before = await get_main_characters(self.config.member(member))
         main_str = ", ".join(
-            f"{game_label(g)}: {m['name']}"
+            f"{game_label(g)}: {char_display_name(m)}"
             for g, m in mains_before.items()
             if m and str(m.get("name", "")).strip()
         )
@@ -1736,7 +2015,7 @@ class WowGuildAutomation(commands.Cog):
         )
         char_lines = []
         for e in linked:
-            char_lines.append(f"{e['name']} ({game_label(e['game_type'])})")
+            char_lines.append(f"{char_display_name(e)} ({game_label(e['game_type'])})")
         chars_str = ", ".join(char_lines)
         try:
             await channel.send(
@@ -1780,26 +2059,110 @@ class WowGuildAutomation(commands.Cog):
         if complete_role:
             await channel.set_permissions(complete_role, view_channel=False, send_messages=False)
 
+    async def _onboarding_notify_officers(
+        self, guild: discord.Guild, guild_cfg: Dict[str, Any], text: str
+    ) -> None:
+        """Notice to the manual-review channel (fallback: officer character channel)."""
+        ch_cfg = guild_cfg.get("channels", {}) or {}
+        for key in ("manual_review_channel_id", "officer_character_notify_channel_id"):
+            try:
+                ch_id = int(ch_cfg.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                ch_id = 0
+            channel = guild.get_channel(ch_id) if ch_id else None
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            try:
+                await channel.send(text[:2000])
+                return
+            except discord.HTTPException:
+                continue
+
+    @staticmethod
+    async def _safe_role_change(
+        member: discord.Member, role: Optional[discord.Role], *, add: bool, reason: str
+    ) -> bool:
+        """add_roles / remove_roles without raising on Forbidden / HTTP errors."""
+        if role is None:
+            return True
+        try:
+            if add:
+                if role not in member.roles:
+                    await member.add_roles(role, reason=reason)
+            elif role in member.roles:
+                await member.remove_roles(role, reason=reason)
+            return True
+        except (discord.Forbidden, discord.HTTPException):
+            return False
+
     async def _run_onboarding_flow(self, member: discord.Member, simulated: bool = False) -> None:
-        guild_cfg = await self._guild_config(member.guild)
+        """Onboarding entry point: failures (e.g. closed DMs) end it cleanly and inform the officers."""
+        if member.bot:
+            return
+        guild = member.guild
+        guild_cfg = await self._guild_config(guild)
         if not guild_cfg.get("features", {}).get("onboarding", True):
             return
-        session_id = f"{datetime.now(timezone.utc).timestamp()}:{member.guild.id}:{member.id}"
-        await self.config.member(member).onboarding_session_id.set(session_id)
+        try:
+            await self._run_onboarding_flow_inner(member, guild_cfg, simulated=simulated)
+        except Exception as exc:
+            dm_closed = isinstance(exc, discord.Forbidden)
+            if not dm_closed:
+                log.exception("Onboarding failed for member %s in guild %s", member.id, guild.id)
+            lang = await self._guild_lang(guild)
+            role_note = ""
+            try:
+                new_role_id = int((guild_cfg.get("roles") or {}).get("onboarding_new_role_id", 0) or 0)
+            except (TypeError, ValueError):
+                new_role_id = 0
+            new_role = guild.get_role(new_role_id) if new_role_id else None
+            if new_role is not None and new_role in member.roles:
+                if await self._safe_role_change(member, new_role, add=False, reason="Onboarding aborted"):
+                    role_note = tr_lang(
+                        lang,
+                        f" Rolle {new_role.mention} wurde wieder entfernt.",
+                        f" Role {new_role.mention} was removed again.",
+                    )
+            if dm_closed:
+                why = tr_lang(
+                    lang,
+                    "Direktnachrichten geschlossen oder fehlende Bot-Rechte",
+                    "direct messages closed or missing bot permissions",
+                )
+            else:
+                why = tr_lang(lang, f"interner Fehler ({type(exc).__name__})", f"internal error ({type(exc).__name__})")
+            await self._onboarding_notify_officers(
+                guild,
+                guild_cfg,
+                tr_lang(
+                    lang,
+                    f"\u26a0 Onboarding für {member.mention} (`{member.id}`) abgebrochen: {why}. "
+                    f"Bitte manuell betreuen.{role_note}",
+                    f"\u26a0 Onboarding for {member.mention} (`{member.id}`) aborted: {why}. "
+                    f"Please handle manually.{role_note}",
+                ),
+            )
 
-        new_role_id = guild_cfg.get("roles", {}).get("onboarding_new_role_id", 0)
-        if new_role_id:
-            new_role = member.guild.get_role(new_role_id)
-            if new_role and new_role not in member.roles:
-                await member.add_roles(new_role, reason="Onboarding started")
+    async def _run_onboarding_flow_inner(
+        self, member: discord.Member, guild_cfg: Dict[str, Any], *, simulated: bool
+    ) -> None:
+        guild = member.guild
+        conf = self.config.member(member)
+        session_id = f"{datetime.now(timezone.utc).timestamp()}:{guild.id}:{member.id}"
+        await conf.onboarding_session_id.set(session_id)
+
+        roles_cfg = guild_cfg.get("roles", {}) or {}
+        new_role_id = int(roles_cfg.get("onboarding_new_role_id", 0) or 0)
+        new_role = guild.get_role(new_role_id) if new_role_id else None
+        await self._safe_role_change(member, new_role, add=True, reason="Onboarding started")
 
         manual_channel_id = guild_cfg.get("channels", {}).get("manual_review_channel_id", 0)
-        manual_channel = member.guild.get_channel(manual_channel_id) if manual_channel_id else None
+        manual_channel = guild.get_channel(manual_channel_id) if manual_channel_id else None
         if manual_channel and not isinstance(manual_channel, discord.TextChannel):
             manual_channel = None
         onboarding_channel_id = guild_cfg.get("channels", {}).get("onboarding_channel_id", 0)
         onboarding_channel = (
-            member.guild.get_channel(onboarding_channel_id) if onboarding_channel_id else None
+            guild.get_channel(onboarding_channel_id) if onboarding_channel_id else None
         )
         if onboarding_channel and not isinstance(onboarding_channel, discord.TextChannel):
             onboarding_channel = None
@@ -1811,47 +2174,60 @@ class WowGuildAutomation(commands.Cog):
             rank_sync=self.rank_sync,
             manual_channel=manual_channel,  # type: ignore[arg-type]
             onboarding_channel=onboarding_channel,  # type: ignore[arg-type]
-            member_config=self.config.member(member),
+            member_config=conf,
+            member_lock=self._member_lock(guild.id, member.id),
         )
         chosen_lang = onboarding_result.get("language", "en-US")
         selected_game = onboarding_result.get("selected_game", "retail")
-        registration = onboarding_result.get("registration", {})
+        # Game type from the profile version (a Forever profile may use any key).
+        link_game = onboarding_result.get("link_game") or game_for_profile(
+            selected_game, (guild_cfg.get("wow_profiles") or {}).get(selected_game)
+        )
+        registration = dict(onboarding_result.get("registration", {}) or {})
         registration["registered_at"] = datetime.now(timezone.utc).isoformat()
         rules_confirmed = bool(registration.get("rules_confirmed", False))
-        await self.config.member(member).onboarding_language.set(chosen_lang)
-        await self.config.member(member).selected_game.set(selected_game)
-        await self.config.member(member).registration.set(registration)
+        async with self._member_lock(guild.id, member.id):
+            existing = await conf.registration()
+            if (
+                isinstance(existing, dict)
+                and existing.get("manual_review")
+                and str(existing.get("manual_review_session") or "") == session_id
+            ):
+                # An officer already decided via the persistent button while onboarding was running.
+                for k in ("manual_review", "manual_review_by", "manual_review_session"):
+                    registration[k] = existing.get(k)
+                if existing.get("manual_review") == "approved":
+                    registration["verified"] = True
+                    registration["requires_manual_verification"] = False
+            await conf.onboarding_language.set(chosen_lang)
+            await conf.selected_game.set(link_game)
+            await conf.registration.set(registration)
 
         char_from_onboarding = str(registration.get("char_name") or "").strip()
         if registration.get("type") == "member" and char_from_onboarding:
-            link_game = profile_key_to_link_game(selected_game)
-            merged_ok = await merge_onboarding_character_into_linked(
-                self.config,
-                member.guild,
-                member,
-                char_from_onboarding,
-                selected_game,
-            )
-            if merged_ok:
-                await set_main_for_game(
-                    self.config.member(member),
-                    link_game,
-                    char_from_onboarding,
-                )
+            async with self._guild_cfg_lock(guild.id):
+                async with self._member_lock(guild.id, member.id):
+                    merged_ok = await merge_onboarding_character_into_linked(
+                        self.config,
+                        guild,
+                        member,
+                        char_from_onboarding,
+                        selected_game,
+                        game_type=link_game,
+                    )
+                    if merged_ok:
+                        await set_main_for_game(conf, link_game, char_from_onboarding)
 
-        complete_role_id = guild_cfg.get("roles", {}).get("onboarding_complete_role_id", 0)
+        complete_role_id = int(roles_cfg.get("onboarding_complete_role_id", 0) or 0)
         if complete_role_id and rules_confirmed:
-            complete_role = member.guild.get_role(complete_role_id)
-            if complete_role and complete_role not in member.roles:
-                await member.add_roles(complete_role, reason="Onboarding completed")
-
-        if new_role_id and rules_confirmed:
-            new_role = member.guild.get_role(new_role_id)
-            if new_role and new_role in member.roles:
-                await member.remove_roles(new_role, reason="Onboarding completed")
+            await self._safe_role_change(
+                member, guild.get_role(complete_role_id), add=True, reason="Onboarding completed"
+            )
+        if new_role is not None and rules_confirmed:
+            await self._safe_role_change(member, new_role, add=False, reason="Onboarding completed")
 
         if not rules_confirmed and not simulated:
-            asyncio.create_task(self._send_rules_reminder_later(member, session_id))
+            self._spawn(self._send_rules_reminder_later(member, session_id))
 
     async def _send_rules_reminder_later(
         self, member: discord.Member, session_id: str, delay_seconds: int = 1800
@@ -1878,6 +2254,8 @@ class WowGuildAutomation(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
+        if member.bot:
+            return
         await self._run_onboarding_flow(member, simulated=False)
 
 
@@ -2336,6 +2714,29 @@ class WowGuildAutomation(commands.Cog):
         data: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        # POST handlers read-modify-write the whole guild config: serialize them per guild.
+        if guild_id is not None and str(method or "").upper() == "POST":
+            try:
+                gid: Optional[int] = int(guild_id)
+            except (TypeError, ValueError):
+                gid = None
+            if gid is not None:
+                async with self._guild_cfg_lock(gid):
+                    return await self._dashboard_wowguild_automation_impl(
+                        user_id=user_id, guild_id=guild_id, method=method, data=data, **kwargs
+                    )
+        return await self._dashboard_wowguild_automation_impl(
+            user_id=user_id, guild_id=guild_id, method=method, data=data, **kwargs
+        )
+
+    async def _dashboard_wowguild_automation_impl(
+        self,
+        user_id: Optional[int] = None,
+        guild_id: Optional[int] = None,
+        method: str = "GET",
+        data: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         try:
             _ = kwargs
             if user_id is None or guild_id is None:
@@ -2376,6 +2777,7 @@ class WowGuildAutomation(commands.Cog):
                             ("classic_era", "classic_era"),
                             ("mop_classic", "mop_classic"),
                             ("sod", "sod"),
+                            ("forever", "forever (WoW Forever)"),
                         ],
                     )
                     realm = wtforms.StringField("Realm")
@@ -2485,7 +2887,7 @@ class WowGuildAutomation(commands.Cog):
                 ]
                 profile_choices = [(k, k) for k in sorted(wow_profiles.keys())] or [("retail", "retail")]
                 form.profile_key.choices = profile_choices + [("__new__", "+ create new profile")]
-                all_versions = ["retail", "classic", "classic_era", "mop_classic", "sod"]
+                all_versions = ["retail", "classic", "classic_era", "mop_classic", "sod", "forever"]
                 missing_versions = [v for v in all_versions if v not in wow_profiles]
                 form.new_profile_version.choices = (
                     [(v, v) for v in missing_versions]
@@ -2640,6 +3042,15 @@ class WowGuildAutomation(commands.Cog):
                             "notifications": [{"message": "Please select a role for mapping.", "category": "warning"}],
                             "redirect_url": kwargs.get("request_url"),
                         }
+                    map_rejected = self._check_role_for_save(
+                        guild, guild.get_member(int(user_id)), role_id, await self._guild_lang(guild)
+                    )
+                    if map_rejected:
+                        return {
+                            "status": 0,
+                            "notifications": [{"message": f"Role rejected: {map_rejected}", "category": "warning"}],
+                            "redirect_url": kwargs.get("request_url"),
+                        }
                     rank_title = str(form.map_rank_title.data or "").strip()
                     if not rank_title:
                         rank_title = f"Rank {rank_idx}"
@@ -2761,7 +3172,10 @@ class WowGuildAutomation(commands.Cog):
                     }
 
                 if form.validate_on_submit():
-                    cfg["language"] = form.language.data if form.language.data in ("de-DE", "en-US") else "en-US"
+                    # Only touch the guild language when the field was actually submitted.
+                    if form.language.raw_data and form.language.data in ("de-DE", "en-US"):
+                        cfg["language"] = form.language.data
+                    extra_notes: List[Dict[str, str]] = []
                     if form.profile_key.data == "__new__":
                         selected_new = str(form.new_profile_version.data or "").strip().lower()
                         if selected_new == "__none__" or selected_new not in missing_versions:
@@ -2776,16 +3190,28 @@ class WowGuildAutomation(commands.Cog):
                                 "redirect_url": kwargs.get("request_url"),
                             }
                         profile_key = selected_new
+                        # A new profile gets the version chosen for it.
+                        profile_version = selected_new
                     else:
-                        profile_key = str(form.profile_key.data or form.version.data or "retail").strip().lower()
+                        # The form shows the ACTIVE profile's values -> save only into that profile.
+                        profile_key = str(active_key or "retail").strip()
+                        selected_other = str(form.profile_key.data or "").strip()
+                        if selected_other and selected_other != profile_key:
+                            extra_notes.append(
+                                {
+                                    "message": (
+                                        f"Saved into the displayed active profile `{profile_key}`. "
+                                        f"Use 'Load Selected Profile' first to edit `{selected_other}`."
+                                    ),
+                                    "category": "info",
+                                }
+                            )
+                        profile_version = str(form.version.data or profile_key or "retail").strip().lower()
                     bot_setup = await self.config.bot_setup()
                     default_region = str(bot_setup.get("default_region", "eu")).strip().lower()
-                    default_language = bot_setup.get("default_language", "en-US")
-                    if default_language in ("de-DE", "en-US"):
-                        cfg["language"] = default_language
                     profile = {
                         "region": str(form.region.data or default_region).strip().lower(),
-                        "version": str(form.version.data or profile_key or "retail").strip().lower(),
+                        "version": profile_version,
                         "realm": str(form.realm.data or "").strip(),
                         "guild_name": str(form.guild_name.data or "").strip(),
                     }
@@ -2802,13 +3228,29 @@ class WowGuildAutomation(commands.Cog):
                     cfg["features"]["allied_guilds"] = bool(form.allied_guilds_enabled.data)
                     guilds_lines = str(form.allied_guilds.data or "").splitlines()
                     cfg["allied_guilds"] = [ln.strip() for ln in guilds_lines if ln.strip()]
-                    cfg["roles"] = {
-                        "guest_role_id": int(form.guest_role_id.data or 0),
-                        "allied_role_id": int(form.allied_role_id.data or 0),
-                        "member_role_id": int(form.member_role_id.data or 0),
-                        "onboarding_new_role_id": int(form.onboarding_new_role_id.data or 0),
-                        "onboarding_complete_role_id": int(form.onboarding_complete_role_id.data or 0),
-                    }
+                    prev_roles = dict(cfg.get("roles") or {})
+                    accepted_roles, rejected_roles = self._filter_role_changes(
+                        guild,
+                        guild.get_member(int(user_id)),
+                        {
+                            "guest_role_id": (form.guest_role_id.data, prev_roles.get("guest_role_id", 0)),
+                            "allied_role_id": (form.allied_role_id.data, prev_roles.get("allied_role_id", 0)),
+                            "member_role_id": (form.member_role_id.data, prev_roles.get("member_role_id", 0)),
+                            "onboarding_new_role_id": (
+                                form.onboarding_new_role_id.data, prev_roles.get("onboarding_new_role_id", 0)
+                            ),
+                            "onboarding_complete_role_id": (
+                                form.onboarding_complete_role_id.data,
+                                prev_roles.get("onboarding_complete_role_id", 0),
+                            ),
+                        },
+                        await self._guild_lang(guild),
+                    )
+                    cfg["roles"] = accepted_roles
+                    for msg in rejected_roles:
+                        extra_notes.append(
+                            {"message": f"Role rejected (previous value kept): {msg}", "category": "warning"}
+                        )
                     ch_merge = dict(cfg.get("channels") or {})
                     ch_merge.update(
                         {
@@ -2936,7 +3378,9 @@ class WowGuildAutomation(commands.Cog):
                     await self._apply_onboarding_channel_permissions(guild)
                     return {
                         "status": 0,
-                        "notifications": notifications + [{"message": "WoW guild settings saved.", "category": "success"}],
+                        "notifications": notifications
+                        + extra_notes
+                        + [{"message": "WoW guild settings saved.", "category": "success"}],
                         "redirect_url": kwargs.get("request_url"),
                     }
 
@@ -3063,9 +3507,9 @@ class WowGuildAutomation(commands.Cog):
 </style>
 <div class="wow-wrap">
   <h2>WoW Guild Settings</h2>
-  <p>Settings for <b>{guild.name}</b> - For the Horde/Alliance dashboard mode.</p>
+  <p>Settings for <b>{html.escape(guild.name)}</b> - For the Horde/Alliance dashboard mode.</p>
   <div class="wow-meta">
-    <span class="wow-badge">Active profile: <b>{active_profile_for_ui}</b></span>
+    <span class="wow-badge">Active profile: <b>{html.escape(str(active_profile_for_ui))}</b></span>
     <span class="wow-badge">Registrations stored: <b>{reg_count}</b></span>
     <span class="wow-badge">Configured profiles: <b>{len(wow_profiles)}</b></span>
   </div>
@@ -3081,7 +3525,7 @@ class WowGuildAutomation(commands.Cog):
         <p>{form.load_profile()}</p>
         <p><label>Profile Region</label><br>{form.region()}<br><small>eu, us, kr, tw</small></p>
         <p><label>Profile Version</label><br>{form.version()}</p>
-        <p><label>Realm</label><br>{form.realm()}</p>
+        <p><label>Realm</label><br>{form.realm()}<br><small>WoW Forever: no realms – leave empty / keine Realms – leer lassen</small></p>
         <p><label>Guild Name</label><br>{form.guild_name()}</p>
       </div>
 

@@ -12,13 +12,13 @@ from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_g
 
 from .autocomplete import (
     REGIONS,
-    REALMS as AC_REALMS,
-    fetch_realm_names,
+    realm_choices,
     _LANG_CODES as AC_LANG_CODES,
     _API_HOST,
     _AUTH_HOST,
 )
 from .pdc_dashboard import tr_lang
+from .blizzard_rest import character_segment, realm_segment, reset_token_caches
 
 _ = Translator("WoWTools", __file__)
 
@@ -91,6 +91,8 @@ async def _fetch_equipment(self, *, region: str, realm_slug: str, char_slug: str
     async with aiohttp.ClientSession() as s:
         async with s.get(url, params=params, headers=headers) as resp:
             js = await resp.json()
+            if resp.status == 401:
+                reset_token_caches(self)
             if resp.status != 200:
                 raise RuntimeError(f"{resp.status}: {js}")
             return js
@@ -134,6 +136,8 @@ async def _fetch_statistics(self, *, region: str, realm_slug: str, char_slug: st
     async with aiohttp.ClientSession() as s:
         async with s.get(url, params=params, headers=headers) as resp:
             js = await resp.json()
+            if resp.status == 401:
+                reset_token_caches(self)
             if resp.status != 200:
                 raise RuntimeError(f"{resp.status}: {js}")
             return js
@@ -149,6 +153,8 @@ async def _fetch_achv_statistics(self, *, region: str, realm_slug: str, char_slu
     async with aiohttp.ClientSession() as s:
         async with s.get(url, params=params, headers=headers) as resp:
             js = await resp.json()
+            if resp.status == 401:
+                reset_token_caches(self)
             if resp.status != 200:
                 raise RuntimeError(f"{resp.status}: {js}")
             return js
@@ -395,10 +401,10 @@ class CompareChars(commands.Cog):
         region = (region or "").lower()
         locale = _resolve_locale(locale)
 
-        realm1_slug = server_char1.lower().replace(" ", "-")
-        realm2_slug = server_char2.lower().replace(" ", "-")
-        char1_slug = name_char1.lower()
-        char2_slug = name_char2.lower()
+        realm1_slug = realm_segment(server_char1, region)
+        realm2_slug = realm_segment(server_char2, region)
+        char1_slug = character_segment(name_char1)
+        char2_slug = character_segment(name_char2)
 
         # Slash: defer correctly right away (set ephemeral beforehand!)
         if ctx.interaction:
@@ -464,18 +470,14 @@ class CompareChars(commands.Cog):
     @comparechars.autocomplete("server_char1")
     async def ac_realm1(self, interaction: discord.Interaction, current: str):
         sel_region = getattr(interaction.namespace, "region", "") or "eu"
-        cur = (current or "").lower()
-        names = await fetch_realm_names(lambda r: _get_access_token(self, r), sel_region)
-        out = [n for n in names if not cur or cur in n.lower()]
-        return [app_commands.Choice(name=r, value=r) for r in out[:25]]
+        # Choice value = Blizzard realm slug, label = realm name.
+        return await realm_choices(lambda r: _get_access_token(self, r), sel_region, current)
 
     @comparechars.autocomplete("server_char2")
     async def ac_realm2(self, interaction: discord.Interaction, current: str):
         sel_region = getattr(interaction.namespace, "region", "") or "eu"
-        cur = (current or "").lower()
-        names = await fetch_realm_names(lambda r: _get_access_token(self, r), sel_region)
-        out = [n for n in names if not cur or cur in n.lower()]
-        return [app_commands.Choice(name=r, value=r) for r in out[:25]]
+        # Choice value = Blizzard realm slug, label = realm name.
+        return await realm_choices(lambda r: _get_access_token(self, r), sel_region, current)
 
     @comparechars.autocomplete("locale")
     async def ac_locale(self, interaction: discord.Interaction, current: str):

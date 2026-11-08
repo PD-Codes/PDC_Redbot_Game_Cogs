@@ -1,3 +1,5 @@
+# Realm -> WCL serverRegion. WCL only knows EU/US/KR/TW/CN; the Russian and
+# Spanish realms are listed under EU there (the old RU/ES entries were invalid).
 REALMS = {
   "Amnennar": ["EU"],
   "Angerforge": ["US"],
@@ -9,14 +11,14 @@ REALMS = {
   "Azuresong": ["US"],
   "Benediction": ["US"],
   "Bloodsail Buccaneers": ["US"],
-  "Chromie": ["EU", "RU"],
+  "Chromie": ["EU"],
   "Earthfury": ["US"],
   "Earthshaker": ["EU"],
   "Eranikus": ["US"],
   "Everlook": ["EU"],
   "Faerlina": ["US"],
   "Firemaw": ["EU"],
-  "Flamegor": ["EU", "RU"],
+  "Flamegor": ["EU"],
   "Gehennas": ["EU"],
   "Giantstalker": ["EU"],
   "Golemagg": ["EU"],
@@ -25,7 +27,7 @@ REALMS = {
   "Jin'do": ["EU"],
   "Lakeshire": ["EU"],
   "Maladath": ["US"],
-  "Mandokir": ["EU", "ES"],
+  "Mandokir": ["EU"],
   "Mankrik": ["US"],
   "Mirage Raceway": ["EU"],
   "Mograine": ["EU"],

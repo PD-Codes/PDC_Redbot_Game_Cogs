@@ -3,6 +3,9 @@
   "onboarding.ask_mainchar": "Bitte nenne deinen Mainchar-Namen.",
   "onboarding.rules": "Bitte lies die Serverregeln und bestätige sie mit dem erforderlichen Emoji.",
   "verification.manual_required": "Manuelle Verifizierung nötig für {username} als {charname}.",
-  "command.saved": "Erfolgreich gespeichert."
+  "command.saved": "Erfolgreich gespeichert.",
+  "game.forever": "WoW Forever",
+  "onboarding.ask_mainchar_forever": "WoW Forever: Bitte gib Vor- und Nachname deines Mainchars an (z. B. `Anna Himmelsfeder`).",
+  "setup.forever_no_realm": "WoW Forever hat keine Realms – das Realm-Feld leer lassen."
 }
 

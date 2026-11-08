@@ -76,6 +76,15 @@ On member join:
 - after onboarding completes, user gets `onboarding-complete`
 - `onboarding-new` is removed
 
+## WoW Forever
+
+Supported as version/game key `forever` (label "WoW Forever"), next to `retail` and `mop_classic`.
+
+- Guild setup: pick version `forever`; use `forever` as the profile key too (character linking and rank sync look up the profile by game key). Realm stays empty – Forever has no realms.
+- Roster: realm-less `/data/wow/guild/{guild-slug}/roster` with namespace `profile-forever-{region}` (unofficial, community-tested API).
+- Characters have first name + surname; only the pair is unique (slug `name-surname`). Linked characters for Forever store an extra `surname` field and are shown as "Name Surname (WoW Forever)". Onboarding asks for first name and surname.
+- Characters only appear in the API from level 10 and after logging out once.
+
 ## Notes
 
 - Blizzard API integration is currently a functional stub and can be replaced with real OAuth/API calls.

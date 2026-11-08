@@ -1,11 +1,13 @@
 # Most of the source of this file for the actual API mechanics can be found at:
 # https://github.com/Kowlin/GraphQL-WoWLogs/blob/master/wowlogs/core.py
 
-import json, pprint, io
+import asyncio
+import io
 import logging
 import math
+import time
 from datetime import datetime, timezone
-from typing import List, Literal, Mapping, Optional
+from typing import Dict, List, Literal, Mapping, Optional, Tuple
 from .wclEnums import SLOT_ORDER_MOP
 
 import discord
@@ -18,7 +20,7 @@ from redbot.core.data_manager import bundled_data_path
 from redbot.core.i18n import Translator, cog_i18n, set_contextual_locales_from_guild
 from redbot.core.utils.chat_formatting import box, humanize_list
 
-from .autocomplete import REALMS
+from .autocomplete import REALMS, REGIONS
 from .pdc_dashboard import (
     dashboard_widget, dashboard_panel,
     WidgetData, PanelSchema, Field, SubmitResult,
@@ -26,13 +28,18 @@ from .pdc_dashboard import (
     L, tr, tr_lang,
 )
 from .enchantid import ENCHANT_ID
-from .encounterid import DIFFICULTIES, ZONES_BY_ID, ZONES_BY_SHORT_NAME
+from .encounterid import DIFFICULTIES, ZONE_ALIASES
 from .http import WoWLogsClient, generate_bearer
 
 _ = Translator("WarcraftLogsClassic", __file__)
 log = logging.getLogger("red.karlo-cogs.warcraftlogs")
 
 WCL_URL = "https://classic.warcraftlogs.com/reports/{}"
+
+# How long (seconds) to cache the live zone list before re-fetching.
+ZONES_CACHE_TTL = 3600
+# Max number of zones probed when no zone was requested (rate-limit friendly).
+ZONE_PROBE_LIMIT = 10
 
 
 @cog_i18n(_)
@@ -45,7 +52,20 @@ class WarcraftLogsClassic(commands.Cog):
         self.http: WoWLogsClient = None
         self.path = bundled_data_path(self)
 
-        self.config.register_global(bearer_timestamp=0)
+        # The bearer is stored in this cog's OWN config (NOT the shared
+        # "warcraftlogs" tokens): writing it there fired the token-update
+        # listeners of the retail/forever cogs and broke their sessions.
+        self.config.register_global(bearer_timestamp=0, bearer=None)
+
+        # Live zone cache (WCL zone ids are not Blizzard instance ids).
+        self._zones_cache: Optional[list] = None
+        self._zones_cache_time: float = 0.0
+
+        # Serializes bearer renewal (concurrent 401s / expiry / token updates).
+        self._token_lock = asyncio.Lock()
+        # Last seen shared client credentials: token updates that do not change
+        # them (e.g. a bearer written by another cog) are ignored.
+        self._client_creds: Tuple[str, str] = ("", "")
 
         default_user = {
             "charname": None,
@@ -60,16 +80,58 @@ class WarcraftLogsClassic(commands.Cog):
         self.config.register_user(**default_user)
         self.config.register_guild(**default_guild)
 
+    async def _read_client_creds(
+        self, api_tokens: Optional[Mapping[str, str]] = None
+    ) -> Tuple[str, str]:
+        if api_tokens is None:
+            api_tokens = await self.bot.get_shared_api_tokens("warcraftlogs")
+        return (api_tokens.get("client_id", "") or "", api_tokens.get("client_secret", "") or "")
+
     async def _create_client(self) -> None:
-        self.http = WoWLogsClient(bearer=await self._get_bearer())
-        bearer_status = await self.http.check_bearer()
-        if bearer_status is False:
-            await generate_bearer(self.bot, self.config)
-            await self.http.recreate_session(await self._get_bearer())
+        """Create the API client. Never raises, so the cog always loads;
+        commands report missing/invalid credentials instead."""
+        self._client_creds = await self._read_client_creds()
+        self.http = WoWLogsClient(bearer=await self._get_bearer(), refresher=self._refresh_bearer)
+        # A 401 (or non-JSON) answer regenerates the bearer once inside _post.
+        await self.http.check_bearer()
+
+    async def _refresh_bearer(self, stale: Optional[str] = None, force: bool = False) -> Optional[str]:
+        """Generate a new bearer and swap the client session (serialized).
+
+        ``stale`` is the bearer that failed or expired; if another task already
+        replaced it while this one waited for the lock, the current bearer is
+        reused instead of requesting yet another one. ``force`` always requests
+        a new bearer (e.g. after the shared client credentials changed)."""
+        async with self._token_lock:
+            if (
+                not force
+                and self.http is not None
+                and self.http._bearer
+                and self.http._bearer != stale
+            ):
+                return self.http._bearer
+            bearer = await generate_bearer(self.bot, self.config)
+            if bearer is None:
+                return None
+            if self.http is None:
+                self.http = WoWLogsClient(bearer=bearer, refresher=self._refresh_bearer)
+            else:
+                await self.http.recreate_session(bearer)
+            return bearer
+
+    async def _ensure_client(self) -> bool:
+        """Make sure a session with a non-expired bearer exists (bearers expire)."""
+        if self.http is None:
+            await self._create_client()
+            return bool(self.http and self.http._bearer)
+        timestamp_now = int(datetime.now(timezone.utc).timestamp())
+        if not self.http._bearer or timestamp_now > await self.config.bearer_timestamp():
+            await self._refresh_bearer(self.http._bearer)
+        return bool(self.http._bearer)
 
     async def _get_bearer(self) -> Optional[str]:
-        api_tokens = await self.bot.get_shared_api_tokens("warcraftlogs")
-        bearer = api_tokens.get("bearer", "")
+        # The bearer lives in this cog's OWN config (not the shared tokens).
+        bearer = await self.config.bearer()
 
         bearer_timestamp = await self.config.bearer_timestamp()
         timestamp_now = int(datetime.now(timezone.utc).timestamp())
@@ -84,6 +146,32 @@ class WarcraftLogsClassic(commands.Cog):
         if bearer is None:
             return
         return bearer
+
+    async def _get_zones(self, force: bool = False) -> list:
+        """Return the live WCL zone list, cached on the cog instance.
+
+        WCL zone IDs are site-internal and new zones appear with new content,
+        so they are fetched from the API instead of being hardcoded. The result
+        is cached for ``ZONES_CACHE_TTL`` seconds."""
+        now = time.monotonic()
+        if (
+            not force
+            and self._zones_cache is not None
+            and (now - self._zones_cache_time) < ZONES_CACHE_TTL
+        ):
+            return self._zones_cache
+
+        if self.http is None:
+            return self._zones_cache or []
+
+        zones = await self.http.get_zones()
+        if zones is None:
+            # Keep any stale cache rather than returning nothing.
+            return self._zones_cache or []
+
+        self._zones_cache = zones
+        self._zones_cache_time = now
+        return zones
 
     async def cog_load(self) -> None:
         register_dashboard(self)
@@ -140,10 +228,7 @@ class WarcraftLogsClassic(commands.Cog):
     @dashboard_panel("wcl_char", L("Mein WCL-Charakter", "My WCL Character"), mount="guild_settings", permission="guild_member")
     async def wcl_char_panel(self, ctx):
         u = self.config.user_from_id(int(ctx.user.id))
-        region_opts = [
-            {"value": "EU", "label": "EU"},
-            {"value": "US", "label": "US"},
-        ]
+        region_opts = [{"value": r, "label": r} for r in REGIONS]
         return PanelSchema(
             fields=[
                 Field.text("charname", "Character name", value=str(await u.charname() or "")),
@@ -162,7 +247,7 @@ class WarcraftLogsClassic(commands.Cog):
             v = str(data["realm"]).strip()
             await u.realm.set(v or None)
         if "region" in data:
-            v = str(data["region"]).strip()
+            v = str(data["region"]).strip().upper()
             await u.region.set(v or None)
         return SubmitResult.ok("Gespeichert.")
 
@@ -193,7 +278,8 @@ class WarcraftLogsClassic(commands.Cog):
 
     def cog_unload(self) -> None:
         unregister_dashboard(self)
-        self.bot.loop.create_task(self.http.session.close())
+        if self.http is not None:
+            self.bot.loop.create_task(self.http.close())
 
     async def red_get_data_for_user(self, **kwargs):
         return {}
@@ -288,6 +374,9 @@ class WarcraftLogsClassic(commands.Cog):
 
         await ctx.defer()
 
+        if not await self._ensure_client():
+            return await ctx.send(self._msg_auth(ctx.clean_prefix))
+
         # Get the user's last raid encounters
         encounters = await self.http.get_last_encounter(name, realm, region)
 
@@ -298,55 +387,59 @@ class WarcraftLogsClassic(commands.Cog):
             # the user wasn't found on the API.
             return await ctx.send(_("{name} wasn't found on the API.").format(name=name))
 
+        if encounters.get("auth"):
+            return await ctx.send(self._msg_auth(ctx.clean_prefix))
         error = encounters.get("error", None)
         if error:
             return await ctx.send(f"WCL API Error: {error}")
 
-        char_data = await self.http.get_gear(name, realm, region, encounters["latest"])
-        if not char_data:
+        # Latest boss kill first, then the other kills of the last report.
+        encounter_ids = [e for e in encounters.get("ids", []) if e]
+        latest = encounters.get("latest") or 0
+        if latest:
+            encounter_ids = [latest] + [e for e in encounter_ids if e != latest]
+        if not encounter_ids:
             return await ctx.send(
-                _("Check your API token and make sure you " "have added it to the bot correctly.")
+                _("No boss kills found in the last report of {name}.").format(name=name)
             )
-        if char_data.get("error"):
-            return await ctx.send(f"WCL API Error: {char_data['error']}")
-        gear = None
 
-        if char_data.get("encounterRankings") and len(char_data["encounterRankings"]["ranks"]) != 0:
+        gear = None
+        best_rank = None
+        for encounter in encounter_ids:
+            char_data = await self.http.get_gear(name, realm, region, encounter)
+            if char_data is None:
+                return await ctx.send(_("The bearer token was invalidated for some reason."))
+            if char_data is False:
+                return await ctx.send(_("{name} wasn't found on the API.").format(name=name))
+            if not isinstance(char_data, dict):
+                continue
+            if char_data.get("auth"):
+                return await ctx.send(self._msg_auth(ctx.clean_prefix))
+            if char_data.get("error"):
+                if encounter == encounter_ids[0]:
+                    return await ctx.send(f"WCL API Error: {char_data['error']}")
+                continue
             # Ensure this is the encounter that has gear listed.
             # IF it's not, we're moving on with the other encounters.
+            rankings = char_data.get("encounterRankings")
+            ranks = rankings.get("ranks") if isinstance(rankings, dict) else None
+            if not ranks:
+                continue
             sorted_by_time = sorted(
-                char_data["encounterRankings"]["ranks"],
-                key=lambda k: (
-                    k["report"]["startTime"] if k["report"]["startTime"] is not None else 0
-                ),
+                ranks,
+                key=lambda k: ((k.get("report") or {}).get("startTime") or 0),
                 reverse=True,
             )
-            gear = sorted_by_time[0]["gear"]
-        else:
-            encounters["ids"].remove(encounters["latest"])
-            for encounter in encounters["ids"]:
-                char_data = await self.http.get_gear(name, realm, region, encounter)
-                # Skip encounters with missing or malformed data.
-                if not char_data or not isinstance(char_data, dict):
-                    continue
-                if not char_data.get("encounterRankings"):
-                    continue
-                if len(char_data["encounterRankings"]["ranks"]) != 0:
-                    sorted_by_time = sorted(
-                        char_data["encounterRankings"]["ranks"],
-                        key=lambda k: (
-                            k["report"]["startTime"] if k["report"]["startTime"] is not None else 0
-                        ),
-                        reverse=True,
-                    )
-                    gear = sorted_by_time[0]["gear"]
-                    break
+            if sorted_by_time[0].get("gear"):
+                best_rank = sorted_by_time[0]
+                gear = best_rank["gear"]
+                break
 
-        if gear is None:
+        if gear is None or best_rank is None:
             return await ctx.send(
                 _("No gear for {name} found in the last report.").format(name=name)
             )
-        
+
         item_list = []
         item_ilevel = 0
         item_count = 0
@@ -362,93 +455,77 @@ class WarcraftLogsClassic(commands.Cog):
 
             rarity = self._get_rarity(item)
             item_ilevel_entry = item.get("itemLevel")
-            if item_ilevel_entry and int(item_ilevel_entry) > 5:
-                item_ilevel += int(item_ilevel_entry)
-                item_count += 1
+            try:
+                if item_ilevel_entry and int(item_ilevel_entry) > 5:
+                    item_ilevel += int(item_ilevel_entry)
+                    item_count += 1
+            except (TypeError, ValueError):
+                pass
 
             # Item-Zeile
             item_list.append(
                 f"{slot_name}: {rarity} "
-                f"[{item['name']}](https://wowhead.com/mop-classic/item={item['id']}) "
+                f"[{item.get('name', item['id'])}](https://wowhead.com/mop-classic/item={item['id']}) "
                 f"({item_ilevel_entry})"
             )
 
-            # Enchants & Gems
-            perm_enchant_id = item.get("permanentEnchant")
-            temp_enchant_id = item.get("temporaryEnchant")
-            gem_id = item.get("gems")
-            gem_id = gem_id[0].get("id") if gem_id else None
+            # Enchants & gems. ENCHANT_ID keys are strings while WCL sends ints,
+            # so the lookup uses str(id). Unknown ids are not shown (as before).
+            sub_lines = []
+            perm_enchant = item.get("permanentEnchant")
+            if perm_enchant:
+                label = ENCHANT_ID.get(str(perm_enchant)) or item.get("permanentEnchantName")
+                if label:
+                    sub_lines.append(label)
+            for gem in item.get("gems") or []:
+                gem_id = gem.get("id") if isinstance(gem, dict) else None
+                label = ENCHANT_ID.get(str(gem_id)) if gem_id else None
+                if label:
+                    sub_lines.append(label)
+            temp_enchant = item.get("temporaryEnchant")
+            if temp_enchant:
+                label = ENCHANT_ID.get(str(temp_enchant)) or item.get("temporaryEnchantName")
+                if label:
+                    sub_lines.append(label)
+            for i, line in enumerate(sub_lines):
+                symbol = "└" if i == len(sub_lines) - 1 else "├"
+                item_list.append(f"`{symbol}──` {line}")
 
-            perm_enchant_text = ENCHANT_ID.get(perm_enchant_id)
-            temp_enchant_text = ENCHANT_ID.get(temp_enchant_id)
-            gem_text = ENCHANT_ID.get(gem_id)
-
-            if perm_enchant_id:
-                if temp_enchant_id and temp_enchant_text:
-                    symbol = "├"
-                elif gem_id and gem_text:
-                    symbol = "├"
-                else:
-                    symbol = "└"
-                if perm_enchant_text:
-                    item_list.append(f"`{symbol}──` {perm_enchant_text}")
-                elif gem_text:
-                    item_list.append(f"`{symbol}──` {gem_text}")
-
-            if gem_id and gem_text:
-                symbol = "├" if (temp_enchant_id and temp_enchant_text) else "└"
-                item_list.append(f"`{symbol}──` {gem_text}")
-
-            if temp_enchant_id and temp_enchant_text:
-                item_list.append(f"`└──` {temp_enchant_text}")
-
-
-        if item_ilevel > 0:
-            avg_ilevel = "{:g}".format(item_ilevel / item_count)
+        if item_count > 0:
+            avg_ilevel = "{:g}".format(round(item_ilevel / item_count, 1))
         else:
             avg_ilevel = _("Unknown (not present in log data from the API)")
 
-        if ctx.channel.permissions_for(ctx.guild.me).embed_links:
+        title = f"{name.title()} - {realm.title()} ({region.upper()})"
+        guild_name = (best_rank.get("guild") or {}).get("name", None)
+        ilvl = _("Average Item Level: {avg_ilevel}\n").format(avg_ilevel=avg_ilevel)
+        encounter_spec = best_rank.get("spec", None)
+        spec = _("Encounter spec: {encounter_spec}\n").format(encounter_spec=encounter_spec)
+        gear_data = _("Gear data pulled from {report_url}\n").format(
+            report_url=WCL_URL.format((best_rank.get("report") or {}).get("code", ""))
+        )
+        log_date = _("Log Date/Time: {datetime} UTC").format(
+            datetime=self._time_convert(best_rank.get("startTime") or 0)
+        )
+
+        # DMs have no guild (and no guild.me): embeds are always allowed there.
+        if ctx.guild is None or ctx.channel.permissions_for(ctx.guild.me).embed_links:
             # embed
             embed = discord.Embed()
-            title = f"{name.title()} - {realm.title()} ({region.upper()})"
-            guild_name = (sorted_by_time[0].get("guild") or {}).get("name", None)
             if guild_name:
                 title += f"\n{guild_name}"
-            embed.title = title
-            embed.description = "\n".join(item_list)
+            embed.title = title[:256]
+            embed.description = "\n".join(item_list)[:4096]
             embed.colour = await ctx.embed_color()
-
-            # embed footer
-            ilvl = _("Average Item Level: {avg_ilevel}\n").format(avg_ilevel=avg_ilevel)
-            encounter_spec = sorted_by_time[0].get("spec", None)
-            spec = _("Encounter spec: {encounter_spec}\n").format(encounter_spec=encounter_spec)
-            gear_data = _("Gear data pulled from {report_url}\n").format(
-                report_url=WCL_URL.format(sorted_by_time[0]["report"]["code"])
-            )
-            log_date = _("Log Date/Time: {datetime} UTC").format(
-                datetime=self._time_convert(sorted_by_time[0]["startTime"])
-            )
             embed.set_footer(text=f"{spec}{ilvl}{gear_data}{log_date}")
             await ctx.send(embed=embed)
         else:
-            title = f"{name.title()} - {realm.title()} ({region.upper()})"
-            guild_name = (sorted_by_time[0].get("guild") or {}).get("name", None)
             if guild_name:
                 title += f" - {guild_name}"
-            ilvl = _("Average Item Level: {avg_ilevel}\n").format(avg_ilevel=avg_ilevel)
-            encounter_spec = sorted_by_time[0].get("spec", None)
-            spec = _("Encounter spec: {encounter_spec}\n").format(encounter_spec=encounter_spec)
-            gear_data = _("Gear data pulled from {report_url}\n").format(
-                report_url=WCL_URL.format(sorted_by_time[0]["report"]["code"])
-            )
-            log_date = _("Log Date/Time: {datetime} UTC").format(
-                datetime=self._time_convert(sorted_by_time[0]["startTime"])
-            )
             msg = "{}\n{}{}{}{}\n\n{}".format(
                 title, spec, ilvl, gear_data, log_date, "\n".join(item_list)
             )
-            await ctx.send(msg)
+            await ctx.send(msg[:2000])
 
     @gear.autocomplete("realm")
     async def warcraftlogs_gear_realm_autocomplete(
@@ -466,10 +543,6 @@ class WarcraftLogsClassic(commands.Cog):
         }},
     )
     @app_commands.choices(
-        zone=[
-            app_commands.Choice(name=zone[0], value=short_name)
-            for short_name, zone in ZONES_BY_SHORT_NAME.items()
-        ],
         difficulty=[
             app_commands.Choice(name=difficulty.title(), value=difficulty)
             for difficulty in DIFFICULTIES.values()
@@ -498,21 +571,31 @@ class WarcraftLogsClassic(commands.Cog):
         [p]getrank Username Draenor:EU
         [p]getrank Username Alterac-Mountains:US
 
-        Specific Zones:
-        [p]getrank Username Draenor:EU CN Heroic
-        [p]getrank Username Alterac-Mountains:US SoD Mythic
+        Specific Zones (use the autocomplete, the zone name or a short name):
+        [p]getrank Username Draenor:EU ToT Heroic
+        [p]getrank Username Alterac-Mountains:US "Siege of Orgrimmar" Normal
 
-        Zone name must be formatted like:
-        CN, SoD, SotFO
+        Short names (case-insensitive):
+        MSV, HoF, ToES, ToT, SoO
         """
         if ctx.interaction:
             # There is no contextual locale for interactions, so we need to set it manually
             # (This is probably a bug in Red, remove this when it's fixed)
             await set_contextual_locales_from_guild(self.bot, ctx.guild)
 
+        # Defer first: everything below may hit the network.
+        await ctx.defer()
+
+        if not await self._ensure_client():
+            return await ctx.send(self._msg_auth(ctx.clean_prefix))
+
+        # Fetch the live zone list (cached).
+        zones = await self._get_zones()
+        zones_by_id, zones_by_name = self._zone_maps(zones)
+
         # someone has their data saved, so they are just trying
         # to look up a zone for themselves
-        if name and name.upper() in ZONES_BY_SHORT_NAME:
+        if name and self._find_zone(name, zones_by_id, zones_by_name) is not None:
             zone = name
             name = None
             realm = None
@@ -545,73 +628,77 @@ class WarcraftLogsClassic(commands.Cog):
         realm = realm.title().replace(" ", "-")
         region = region.upper()
 
-        await ctx.defer()
-
         name = name.title()
 
-        # fetch zone name and zone id from user input
-        zone_id = None
-        if zone and zone.upper() in ZONES_BY_SHORT_NAME:
-            zone_id = ZONES_BY_SHORT_NAME[zone.upper()][1]
-            zone_id_to_name = ZONES_BY_SHORT_NAME[zone.upper()][0]
-        if difficulty and difficulty.upper() in DIFFICULTIES.values():
-            difficulty_ids = list(DIFFICULTIES.keys())
-            for difficulty_id in difficulty_ids:
-                if difficulty.upper() == DIFFICULTIES[difficulty_id]:
-                    difficulty = difficulty_id
-                    break
+        # Resolve zone (autocomplete passes the zone id as value, but accept
+        # a zone name or short name too for prefix-command users).
+        zone_obj = None
+        if zone:
+            zone_obj = self._find_zone(zone, zones_by_id, zones_by_name)
+            if zone_obj is None:
+                return await ctx.send(_("Unknown zone: {zone}").format(zone=zone))
+        zone_id = int(zone_obj["id"]) if zone_obj else None
+        zone_id_to_name = str(zone_obj.get("name") or zone_id) if zone_obj else None
+
+        # Resolve difficulty (a stable WCL difficulty id or its name).
+        if difficulty:
+            difficulty_str = str(difficulty)
+            if difficulty_str.isdigit() and int(difficulty_str) in DIFFICULTIES:
+                difficulty = int(difficulty_str)
+            elif difficulty_str.upper() in DIFFICULTIES.values():
+                for diff_id, diff_name in DIFFICULTIES.items():
+                    if difficulty_str.upper() == diff_name:
+                        difficulty = diff_id
+                        break
+            else:
+                difficulty = 0
         else:
             difficulty = 0
 
+        data = None
         if zone_id is None:
-            # return first raid that actually has parse info in Classic
-            # as no specific zone was requested
-            zone_ids = list(ZONES_BY_ID.keys())
-            zone_ids.reverse()
-            for zone_number in zone_ids:
-                data = await self.http.get_overview(name, realm, region, zone_number, difficulty)
-                if data is None:
-                    return await ctx.send(
-                        _("The bearer token was invalidated for some reason.")
-                    )
-                if error := data.get("error", None):
-                    return await ctx.send(f"WCL API Error: {error}")
-                if (data is False) or (not data["data"]["characterData"]["character"]):
-                    return await ctx.send(_("{name} wasn't found on the API.").format(name=name))
-                char_data = data["data"]["characterData"]["character"]["zoneRankings"]
-                data_test = char_data.get("bestPerformanceAverage", None)
-                if data_test is not None:
+            # Probe the newest non-frozen zones first (highest id, capped at
+            # ZONE_PROBE_LIMIT) until one has parse data, as no specific zone
+            # was requested.
+            candidates = self._probe_candidates(zones)
+            if not candidates:
+                return await ctx.send(_("Could not load the zone list from Warcraft Logs."))
+            for zone_candidate in candidates:
+                data = await self.http.get_overview(
+                    name, realm, region, int(zone_candidate["id"]), difficulty
+                )
+                err = self._overview_error(data, ctx.clean_prefix, name)
+                if err:
+                    if data and data.get("error") and not data.get("auth"):
+                        # Zone may not support rankings (e.g. dungeons): keep probing.
+                        continue
+                    return await ctx.send(err)
+                if self._zone_rankings(data).get("bestPerformanceAverage") is not None:
                     break
         else:
             # try getting a specific zone's worth of info for this character
             data = await self.http.get_overview(name, realm, region, zone_id, difficulty)
-            if data is None:
-                return await ctx.send(_("The bearer token was invalidated for some reason."))
-            if error := data.get("error", None):
-                return await ctx.send(f"WCL API Error: {error}")
-            if (data is False) or (not data["data"]["characterData"]["character"]):
-                return await ctx.send(_("{name} wasn't found on the API.").format(name=name))
+            err = self._overview_error(data, ctx.clean_prefix, name)
+            if err:
+                return await ctx.send(err)
+
+        if not isinstance(data, dict) or data.get("error"):
+            return await ctx.send(_("Nothing at all found for this player."))
 
         # embed and data setup
         zws = "\N{ZERO WIDTH SPACE}"
 
-        try:
-            char_data = data["data"]["characterData"]["character"]["zoneRankings"]
-        except (KeyError, TypeError):
+        char_data = self._zone_rankings(data)
+        if not char_data:
             msg = _(
                 "Something went terribly wrong while trying to "
                 "access the zone rankings for this character."
             )
             return await ctx.send(msg)
 
-        try:
-            difficulty = (
-                await self._difficulty_name_from_id(char_data["difficulty"])
-            ).capitalize()
-        except KeyError:
-            await ctx.send("No data found for that difficulty.")
-            return
-        zone_name = await self._zone_name_from_id(char_data["zone"])
+        result_zone = zones_by_id.get(str(char_data.get("zone"))) or zone_obj
+        difficulty = self._difficulty_name(char_data.get("difficulty"), result_zone)
+        zone_name = (result_zone or {}).get("name") or str(char_data.get("zone", "?"))
         zone_name = f"⫷ {difficulty} {zone_name} ⫸".center(50, " ")
 
         embed = discord.Embed()
@@ -634,8 +721,8 @@ class WarcraftLogsClassic(commands.Cog):
         pf_avg = "{:.1f}".format(char_data["bestPerformanceAverage"])
         pf_avg = self._get_color(float(pf_avg))
         embed.add_field(name=_("Best Perf. Avg"), value=pf_avg, inline=True)
-        md_avg = "{:.1f}".format(char_data["medianPerformanceAverage"])
-        md_avg = self._get_color(float(md_avg))
+        md_raw = char_data.get("medianPerformanceAverage")
+        md_avg = self._get_color(float("{:.1f}".format(md_raw))) if md_raw is not None else "-"
         embed.add_field(name=_("Median Perf. Avg"), value=md_avg, inline=True)
 
         # perf avg filler space
@@ -656,38 +743,32 @@ class WarcraftLogsClassic(commands.Cog):
             _("AS Rank"),
         ]
 
-        # add rankings per encounter to table
-        rankings = char_data["rankings"]
-        for encounter in rankings:
-            all_stars = encounter["allStars"]
-            enc_details = encounter["encounter"]
-            best_amt = (
-                self.humanize_dps(encounter["bestAmount"]) if encounter["bestAmount"] != 0 else "-"
-            )
+        # add rankings per encounter to table (fields read defensively)
+        for encounter in char_data.get("rankings") or []:
+            all_stars = encounter.get("allStars")
+            enc_details = encounter.get("encounter") or {}
+            best_amount = encounter.get("bestAmount") or 0
+            best_amt = self.humanize_dps(best_amount) if best_amount else "-"
             median_pct = (
-                "{:.1f}".format(encounter["medianPercent"]) if encounter["medianPercent"] else "-"
+                "{:.1f}".format(encounter["medianPercent"]) if encounter.get("medianPercent") else "-"
             )
             rank_pct = (
-                "{:.1f}".format(encounter["rankPercent"]) if encounter["medianPercent"] else "-"
+                "{:.1f}".format(encounter["rankPercent"]) if encounter.get("rankPercent") else "-"
             )
-            fastest_kill_tup = self._dynamic_time(encounter["fastestKill"] / 1000)
+            fastest_kill_tup = self._dynamic_time((encounter.get("fastestKill") or 0) / 1000)
 
             if fastest_kill_tup == (0, 0):
                 fastest_kill = "-"
             else:
-                if len(str(fastest_kill_tup[1])) == 1:
-                    seconds = f"0{fastest_kill_tup[1]}"
-                else:
-                    seconds = fastest_kill_tup[1]
-                fastest_kill = f"{fastest_kill_tup[0]}:{seconds}"
+                fastest_kill = f"{fastest_kill_tup[0]}:{fastest_kill_tup[1]:02d}"
 
             table.rows.append(
                 (
                     enc_details.get("name", None),
                     rank_pct,
-                    encounter["spec"],
+                    encounter.get("spec") or "-",
                     best_amt,
-                    encounter["totalKills"],
+                    encounter.get("totalKills", 0),
                     fastest_kill,
                     median_pct,
                     all_stars.get("points", None) if all_stars else "-",
@@ -696,24 +777,22 @@ class WarcraftLogsClassic(commands.Cog):
             )
 
         # all stars
-        all_stars = char_data["allStars"]
-        section_name = _("⫷ Expansion All Stars ⫸").center(50, " ")
-        embed.add_field(name=zws, value=box(section_name, lang="Prolog"), inline=False)
-        for item in all_stars:
-            msg = f"**{item['spec']}**\n"
-            rank_percent = "{:.1f}".format(item["rankPercent"])
-            msg += _("Points:\n`{points}`\n").format(points=item["points"])
-            msg += _("Rank:\n`{rank}`\n").format(rank=item["rank"])
-            msg += f"{self._get_color(float(rank_percent), '%')}\n"
-            embed.add_field(name=zws, value=msg, inline=True)
+        all_stars = char_data.get("allStars") or []
+        if all_stars:
+            section_name = _("⫷ Expansion All Stars ⫸").center(50, " ")
+            embed.add_field(name=zws, value=box(section_name, lang="Prolog"), inline=False)
+            for item in all_stars:
+                msg = f"**{item.get('spec', '-')}**\n"
+                msg += _("Points:\n`{points}`\n").format(points=item.get("points"))
+                msg += _("Rank:\n`{rank}`\n").format(rank=item.get("rank"))
+                if item.get("rankPercent") is not None:
+                    rank_percent = "{:.1f}".format(item["rankPercent"])
+                    msg += f"{self._get_color(float(rank_percent), '%')}\n"
+                embed.add_field(name=zws, value=msg, inline=True)
 
-        # all stars filler space
-        nearest_multiple = (
-            len(all_stars) if len(all_stars) % 3 == 0 else 3 * math.ceil(len(all_stars) / 3)
-        )
-        bonus_empty_fields = nearest_multiple - len(all_stars)
-        if bonus_empty_fields > 0:
-            for _1 in range(bonus_empty_fields):
+            # all stars filler space
+            nearest_multiple = 3 * math.ceil(len(all_stars) / 3)
+            for _1 in range(nearest_multiple - len(all_stars)):
                 embed.add_field(name=zws, value=zws, inline=True)
 
         # table time
@@ -729,6 +808,16 @@ class WarcraftLogsClassic(commands.Cog):
     ) -> List[app_commands.Choice[str]]:
         realms = await self.get_realms(current)
         return realms[:25]
+
+    @rank.autocomplete("zone")
+    async def warcraftlogs_rank_zone_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        """Autocomplete the raid zone from the live (cached) WCL zone list.
+
+        Choice value is the WCL zone id (as a string); current zones first,
+        newest first. Short names (MSV, HoF, ToES, ToT, SoO) match as well."""
+        return self._zone_choices(await self._get_zones(), current)
 
     @staticmethod
     def humanize_dps(dps: int | float) -> str:
@@ -790,18 +879,26 @@ class WarcraftLogsClassic(commands.Cog):
             "en-US": "Set your region.",
         }},
     )
-    @app_commands.describe(region="Your region (EU or US)")
+    @app_commands.describe(region="Your region (EU, US, KR or TW)")
     async def wclset_region(self, ctx, region: str):
         """Set your region."""
-        valid_regions = ["EU", "US"]
-        if region.upper() not in valid_regions:
+        if region.upper() not in REGIONS:
             return await ctx.send(
                 _("Valid regions are: {valid_regions}").format(
-                    valid_regions=humanize_list(valid_regions)
+                    valid_regions=humanize_list(REGIONS)
                 )
             )
-        await self.config.user(ctx.author).region.set(region)
+        await self.config.user(ctx.author).region.set(region.upper())
         await ctx.send(_("Your realm's region was set to {region}.").format(region=region.upper()))
+
+    @wclset_region.autocomplete("region")
+    async def wclset_region_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        current_upper = (current or "").upper()
+        return [
+            app_commands.Choice(name=r, value=r) for r in REGIONS if current_upper in r
+        ][:25]
 
     @wclset.command(
         name="channel",
@@ -935,34 +1032,129 @@ class WarcraftLogsClassic(commands.Cog):
     @staticmethod
     def _time_convert(time):
         time = str(time)[:10]
-        return datetime.fromtimestamp(int(time)).strftime("%Y-%m-%d %H:%M:%S")
+        # WCL timestamps are UTC epoch (ms); the output is labelled "UTC".
+        return datetime.fromtimestamp(int(time), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
-    async def _zone_name_from_id(zoneid: int) -> str:
-        for zone_id, zone_name in ZONES_BY_ID.items():
-            if zoneid == zone_id:
-                return zone_name
+    def _msg_auth(prefix: str) -> str:
+        return _(
+            "Warcraft Logs rejected the API credentials or no token could be created. "
+            "Check `{prefix}wclset-classic apikey`."
+        ).format(prefix=prefix)
 
     @staticmethod
-    async def _difficulty_name_from_id(difficultyid: int) -> str:
-        for difficulty_id, difficulty_name in DIFFICULTIES.items():
-            if difficultyid == difficulty_id:
-                return difficulty_name
+    def _zone_maps(zones: list) -> Tuple[Dict[str, dict], Dict[str, dict]]:
+        """id -> zone and lowercased name -> zone (newest zone wins on equal names)."""
+        by_id: Dict[str, dict] = {}
+        by_name: Dict[str, dict] = {}
+        for z in sorted(zones, key=lambda z: int(z["id"])):
+            by_id[str(z["id"])] = z
+            by_name[str(z.get("name") or "").lower()] = z
+        return by_id, by_name
+
+    @staticmethod
+    def _find_zone(
+        zone: str, by_id: Dict[str, dict], by_name: Dict[str, dict]
+    ) -> Optional[dict]:
+        """Resolve a zone id, zone name (case-insensitive) or short name."""
+        key = str(zone).strip()
+        found = by_id.get(key) or by_name.get(key.lower())
+        if found is not None:
+            return found
+        if key.lower() in ZONE_ALIASES:
+            return by_name.get(ZONE_ALIASES[key.lower()].lower())
+        return None
+
+    @staticmethod
+    def _probe_candidates(zones: list) -> list:
+        """Zones probed when no zone was requested: newest first (highest id),
+        frozen zones skipped (unless all are frozen), at most ZONE_PROBE_LIMIT."""
+        newest = sorted(zones, key=lambda z: int(z["id"]), reverse=True)
+        current = [z for z in newest if not z.get("frozen")]
+        return (current or newest)[:ZONE_PROBE_LIMIT]
+
+    @staticmethod
+    def _zone_choices(zones: list, current: str) -> List[app_commands.Choice[str]]:
+        """Zone autocomplete: current (non-frozen) zones, newest first. When the
+        user types something, frozen zones are searched as well (after them)."""
+        current_lower = (current or "").strip().lower()
+        alias = ZONE_ALIASES.get(current_lower, "").lower()
+        newest = sorted(zones, key=lambda z: int(z["id"]), reverse=True)
+        current_zones = [z for z in newest if not z.get("frozen")]
+        if current_lower:
+            ordered = current_zones + [z for z in newest if z.get("frozen")]
+        else:
+            ordered = current_zones or newest
+        choices: List[app_commands.Choice[str]] = []
+        for z in ordered:
+            zname = str(z.get("name") or z["id"])
+            if (
+                current_lower
+                and current_lower not in zname.lower()
+                and alias != zname.lower()
+            ):
+                continue
+            choices.append(app_commands.Choice(name=zname[:100], value=str(z["id"])))
+            if len(choices) >= 25:
+                break
+        return choices
+
+    @staticmethod
+    def _difficulty_name(diff_id, zone_obj: Optional[dict]) -> str:
+        """Difficulty name from the live zone data, then the static table,
+        otherwise the raw id (never None)."""
+        if diff_id is None:
+            return ""
+        try:
+            diff_id = int(diff_id)
+        except (TypeError, ValueError):
+            return str(diff_id)
+        for d in (zone_obj or {}).get("difficulties") or []:
+            try:
+                if int(d["id"]) == diff_id and d.get("name"):
+                    return str(d["name"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        name = DIFFICULTIES.get(diff_id)
+        return name.capitalize() if name else str(diff_id)
+
+    @staticmethod
+    def _zone_rankings(data) -> dict:
+        try:
+            zr = data["data"]["characterData"]["character"]["zoneRankings"]
+        except (KeyError, TypeError):
+            return {}
+        return zr if isinstance(zr, dict) else {}
+
+    def _overview_error(self, data, prefix: str, name: str) -> Optional[str]:
+        """Return a user-facing error message for a get_overview result, or None."""
+        if data is None:
+            return _("The bearer token was invalidated for some reason.")
+        if data.get("auth"):
+            return self._msg_auth(prefix)
+        if data.get("error"):
+            return f"WCL API Error: {data['error']}"
+        try:
+            if not data["data"]["characterData"]["character"]:
+                return _("{name} wasn't found on the API.").format(name=name)
+        except (KeyError, TypeError):
+            return _("Nothing at all found for this player.")
+        return None
 
     def _get_color(self, number: float, bonus=""):
         if number >= 95:
             # legendary
             return self._orange(number, bonus)
-        elif 94 >= number > 75:
+        elif number > 75:
             # epic
             return self._red(number, bonus)
-        elif 75 >= number > 50:
+        elif number > 50:
             # rare
             return self._blue(number, bonus)
-        elif 50 >= number > 25:
+        elif number > 25:
             # common
             return self._green(number, bonus)
-        elif 25 >= number >= 0:
+        elif number >= 0:
             # trash
             return self._grey(number, bonus)
         else:
@@ -1004,23 +1196,19 @@ class WarcraftLogsClassic(commands.Cog):
         """
         Lifted shamelessly from GHC.
         Thanks Kowlin for this and everything else you did on this cog.
+
+        Only reacts when the shared client_id/client_secret actually change.
+        Bearer-only updates of the shared "warcraftlogs" tokens are ignored,
+        because this cog keeps its own bearer in its own Config.
         """
         if service_name != "warcraftlogs":
             return
-        await self.http.recreate_session(await self._get_token(api_tokens))
-
-    async def _get_token(self, api_tokens: Optional[Mapping[str, str]] = None) -> str:
-        """Get WCL bearer token."""
-        if api_tokens is None:
-            api_tokens = await self.bot.get_shared_api_tokens("warcraftlogs")
-
-        bearer = api_tokens.get("bearer", None)
-        if not bearer:
-            log.info("No valid token found, trying to create one.")
-            await generate_bearer(self.bot, self.config)
-            return await self._get_bearer()
-        else:
-            return bearer
+        creds = await self._read_client_creds(api_tokens)
+        if creds == self._client_creds:
+            return
+        self._client_creds = creds
+        # New credentials -> request a new bearer for them and swap the session.
+        await self._refresh_bearer(force=True)
 
     @staticmethod
     async def get_realms(current):

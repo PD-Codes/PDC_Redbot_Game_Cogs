@@ -5,7 +5,7 @@ from discord import app_commands
 
 
 REGIONS = ["eu", "us", "kr", "tw"]
-VERSIONS = ["retail", "classic", "classic_era", "mop_classic"]
+VERSIONS = ["retail", "classic", "classic_era", "mop_classic", "forever"]
 
 
 async def region_autocomplete(

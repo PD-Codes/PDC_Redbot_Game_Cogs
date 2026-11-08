@@ -5,7 +5,6 @@ from enum import Enum
 from typing import List, Optional
 
 import discord
-from aiohttp import ClientResponseError
 from discord.ext import tasks
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 from redbot.core import commands
@@ -14,7 +13,9 @@ from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 from redbot.core.utils.chat_formatting import box, humanize_list, humanize_number
 from tabulate import tabulate
 
-from .exceptions import InvalidBlizzardAPI
+from .autocomplete import GAME
+from .blizzard_rest import BlizzardAPIError, fetch_character, fetch_guild_roster
+from .pdc_dashboard import tr_lang
 
 log = logging.getLogger("red.karlo-cogs.wowtools")
 _ = Translator("WoWTools", __file__)
@@ -23,6 +24,21 @@ DEV_GUILDS = [362298824854863882, 133049272517001216]
 
 
 class Scoreboard:
+    async def _scoreboard_unavailable(self, ctx: commands.Context) -> bool:
+        """The scoreboard is built from raider.io Mythic+ data, which MoP Classic lacks."""
+        if GAME != "classic":
+            return False
+        lang = await self.config.guild(ctx.guild).language() if ctx.guild else "en-US"
+        await ctx.send(
+            tr_lang(
+                lang,
+                "Das Mythic+-Scoreboard ist für MoP Classic nicht verfügbar.",
+                "The Mythic+ scoreboard is not available for MoP Classic.",
+            ),
+            ephemeral=True,
+        )
+        return True
+
     @commands.cooldown(rate=1, per=10, type=commands.BucketType.user)
     @commands.hybrid_group(name="wowtc-wowscoreboard", aliases=["wowtc-sb"])
     @commands.guild_only()
@@ -39,11 +55,14 @@ class Scoreboard:
             # There is no contextual locale for interactions, so we need to set it manually
             # (This is probably a bug in Red, remove this when it's fixed)
             await set_contextual_locales_from_guild(self.bot, ctx.guild)
+        if await self._scoreboard_unavailable(ctx):
+            return
 
+        # Defer right away: the raider.io roster call can exceed the 3s interaction window.
+        await ctx.defer()
         image_enabled = await self.config.guild(ctx.guild).sb_image()
         try:
             if image_enabled:
-                await ctx.defer()
                 embed, img_file = await self._generate_dungeon_scoreboard(ctx, True)
             else:
                 embed = await self._generate_dungeon_scoreboard(ctx)
@@ -93,6 +112,8 @@ class Scoreboard:
         self, ctx: commands.Context, channel: discord.TextChannel | None = None
     ):
         """Set the channel to send the Mythic+ leaderboard to."""
+        if await self._scoreboard_unavailable(ctx):
+            return
         if ctx.interaction:
             await ctx.defer(ephemeral=True)
         image_enabled = await self.config.guild(ctx.guild).sb_image()
@@ -120,6 +141,7 @@ class Scoreboard:
                     )
                 )
             )
+            return
         if sb_msg_id:  # Remove the old scoreboard
             await self._delete_scoreboard(
                 ctx,
@@ -208,6 +230,8 @@ class Scoreboard:
     @commands.guild_only()
     async def sbset_lock(self, ctx: commands.Context):
         """Lock the current scoreboard and do not update it anymore."""
+        if await self._scoreboard_unavailable(ctx):
+            return
         sb_channel_id: int = await self.config.guild(ctx.guild).scoreboard_channel()
         sb_msg_id: int = await self.config.guild(ctx.guild).scoreboard_message()
         if not (sb_channel_id and sb_msg_id):
@@ -241,7 +265,8 @@ class Scoreboard:
             title=_("2nd War Within Season Scoreboard"),
             color=await self.bot.get_embed_color(sb_msg),
         )
-        embed.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url)
+        # ctx.guild.icon can be None (no icon set).
+        embed.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
         try:
             tabulate_list = await self._get_dungeon_scores(
                 guild_name,
@@ -448,16 +473,27 @@ class Scoreboard:
             disable_numparse=True,
         )
         try:
-            await assistant.add_embedding(guild, "wowtools_scoreboard", formatted_rankings, True)
+            # Unique per game so retail and classic do not overwrite each other.
+            embedding_name = "wowtools_scoreboard" if GAME == "retail" else f"wowtools_{GAME}_scoreboard"
+            await assistant.add_embedding(guild, embedding_name, formatted_rankings, True)
         except Exception as e:
             log.error(f"Error adding scoreboard to Assistant: {e}", exc_info=True)
 
     async def get_season_title_cutoff(self, region: str) -> float:
-        current_season = "season-tww-3"  # TODO: Needs to be manually updated every season
-        cutoffs = (
-            await self.raiderio_api.get_mythic_plus_season_cutoffs(region, current_season)
-        ).get("cutoffs")
-        return cutoffs["p999"]["all"]["quantileMinValue"] if cutoffs else 0
+        # Current main season from raider.io static data (was a hard-coded slug).
+        current_season = await self.get_current_mplus_season(region)
+        if not current_season:
+            return 0
+        try:
+            data = await self.raiderio_api.get_mythic_plus_season_cutoffs(region, current_season)
+        except Exception as e:
+            log.debug("Fetching season cutoffs failed: %s", e)
+            return 0
+        cutoffs = (data or {}).get("cutoffs") or {}
+        try:
+            return cutoffs["p999"]["all"]["quantileMinValue"]
+        except (KeyError, TypeError):
+            return 0
 
     @update_dungeon_scoreboard.error
     async def update_dungeon_scoreboard_error(self, error):
@@ -566,7 +602,8 @@ class Scoreboard:
             title=_("Mythic+ Guild Scoreboard"),
             color=await ctx.embed_color(),
         )
-        embed.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url)
+        # ctx.guild.icon can be None (no icon set).
+        embed.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
 
         tabulate_list = await self._get_dungeon_scores(
             guild_name, max_chars, realm, region, sb_blacklist, image
@@ -760,78 +797,42 @@ class Scoreboard:
         region: str,
         sb_blacklist: List[str],
     ) -> list:
-        try:
-            api_client = self.blizzard.get(region)
-        except Exception as e:
-            await ctx.send(_("Command failed successfully. {e}").format(e=e))
-            return []
-        if not api_client:
-            raise InvalidBlizzardAPI
         guild_name = guild_name.replace(" ", "-").lower()
 
         max_level = 80
-        async with api_client as client:
-            wow_client = client.Classic
-            # await self.limiter.acquire()
-            current_season: int = (await wow_client.GameData.get_pvp_seasons_index())[
-                "current_season"
-            ]["id"]
+        # Plain REST calls in this cog's namespace (aiowowapi 2.1.5 has no Classic.Profile).
+        current_season = await self.get_current_pvp_season_id(region)
+        try:
+            guild_roster = await fetch_guild_roster(self, region, realm, guild_name)
+        except BlizzardAPIError:
+            await ctx.send(_("Guild not found."))
+            return []
 
-            # await self.limiter.acquire()
-            try:
-                guild_roster = await wow_client.Profile.get_guild_roster(
-                    name_slug=guild_name, realm_slug=realm
-                )
-            except ClientResponseError:
-                await ctx.send(_("Guild not found."))
-                return []
+        roster = {"rbg": {}, "2v2": {}, "3v3": {}}
 
-            roster = {"rbg": {}, "2v2": {}, "3v3": {}}
+        for member in guild_roster.get("members") or []:
+            character = (member or {}).get("character") or {}
+            character_name = (character.get("name") or "").lower()
+            if not character_name or character_name in sb_blacklist:
+                continue
+            if (character.get("level") or 0) < max_level:
+                continue
 
-            for member in guild_roster["members"]:
-                character_name = member["character"]["name"].lower()
-                if character_name in sb_blacklist:
-                    continue
-                if member["character"]["level"] < max_level:
-                    continue
-
-                log.debug(f"Getting PvP data for {character_name}")
+            log.debug(f"Getting PvP data for {character_name}")
+            statistics = {}
+            for bracket in ("rbg", "2v2", "3v3"):
                 try:
-                    (
-                        rbg_statistics,
-                        duo_statistics,
-                        tri_statistics,
-                    ) = await client.multi_request(
-                        [
-                            wow_client.Profile.get_character_pvp_bracket_statistics(
-                                character_name=character_name,
-                                realm_slug=realm,
-                                pvp_bracket="rbg",
-                            ),
-                            wow_client.Profile.get_character_pvp_bracket_statistics(
-                                character_name=character_name,
-                                realm_slug=realm,
-                                pvp_bracket="2v2",
-                            ),
-                            wow_client.Profile.get_character_pvp_bracket_statistics(
-                                character_name=character_name,
-                                realm_slug=realm,
-                                pvp_bracket="3v3",
-                            ),
-                        ]
+                    await self.limiter.acquire()
+                    statistics[bracket] = await fetch_character(
+                        self, region, realm, character_name, f"pvp-bracket/{bracket}"
                     )
-                except ClientResponseError:
-                    continue
+                except BlizzardAPIError:
+                    statistics[bracket] = {}
 
-                if "rating" in rbg_statistics and rbg_statistics["season"]["id"] == current_season:
-                    roster["rbg"][character_name] = rbg_statistics["rating"]
-                    log.debug(f"{character_name} has RBG rating {rbg_statistics['rating']}")
-                if "rating" in duo_statistics and duo_statistics["season"]["id"] == current_season:
-                    roster["2v2"][character_name] = duo_statistics["rating"]
-                    log.debug(f"{character_name} has 2v2 rating {duo_statistics['rating']}")
-                if "rating" in tri_statistics and tri_statistics["season"]["id"] == current_season:
-                    roster["3v3"][character_name] = tri_statistics["rating"]
-                    log.debug(f"{character_name} has 3v3 rating {tri_statistics['rating']}")
+            for bracket, stats in statistics.items():
+                if "rating" in stats and (stats.get("season") or {}).get("id") == current_season:
+                    roster[bracket][character_name] = stats["rating"]
+                    log.debug(f"{character_name} has {bracket} rating {stats['rating']}")
 
         roster["rbg"] = dict(sorted(roster["rbg"].items(), key=lambda i: i[1], reverse=True))
         roster["2v2"] = dict(sorted(roster["2v2"].items(), key=lambda i: i[1], reverse=True))

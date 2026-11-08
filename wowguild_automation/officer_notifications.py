@@ -4,7 +4,18 @@ from typing import Any, Dict, Optional
 
 import discord
 
-from .character_helpers import game_label
+from .character_helpers import game_for_profile, game_label
+
+
+def _profile_game_label(guild_config: Dict[str, Any], profile_key: str) -> str:
+    """Game label derived from the profile version; keeps the profile key visible if it differs."""
+    prof = (guild_config.get("wow_profiles") or {}).get(profile_key)
+    if prof is None and profile_key not in ("retail", "mop_classic", "forever"):
+        return str(profile_key)
+    gl = game_label(game_for_profile(profile_key, prof))
+    if str(profile_key) not in ("retail", "mop_classic", "forever"):
+        return f"{gl} ({profile_key})"
+    return gl
 
 
 async def send_protected_rank_officer_notice(
@@ -14,6 +25,8 @@ async def send_protected_rank_officer_notice(
     profile_key: str,
     char_name: str,
     rank_title: Optional[str],
+    *,
+    detail: str = "",
 ) -> None:
     """Posts to rank_protected_notify_channel_id when auto rank sync is skipped for a protected rank."""
     ch_id = int(guild_config.get("channels", {}).get("rank_protected_notify_channel_id", 0) or 0)
@@ -29,18 +42,22 @@ async def send_protected_rank_officer_notice(
         )
         or "{member} — **{game}**, Main `{char}`: Rang **{rank}** geschützt."
     )
-    gl = game_label(profile_key) if profile_key in ("retail", "mop_classic") else str(profile_key)
+    gl = _profile_game_label(guild_config, profile_key)
+    detail_val = str(detail or "").strip()
+    mapping = {
+        "member": member.mention,
+        "user": str(member),
+        "username": member.display_name,
+        "user_id": str(member.id),
+        "game": gl,
+        "char": str(char_name).strip(),
+        "rank": str(rank_title or "—"),
+        "profile": str(profile_key),
+        "detail": (" " + detail_val) if detail_val else "",
+    }
     try:
-        text = tpl.format(
-            member=member.mention,
-            user=str(member),
-            username=member.display_name,
-            user_id=str(member.id),
-            game=gl,
-            char=str(char_name).strip(),
-            rank=str(rank_title or "—"),
-            profile=str(profile_key),
-        )
+        # Safe replacement: unknown placeholders stay as-is (no str.format KeyError).
+        text = _apply_template_placeholders(tpl, mapping)
         await channel.send(text[:2000])
     except discord.HTTPException:
         pass
@@ -92,7 +109,7 @@ async def send_rank_lock_officer_notice(
     ).strip() or (
         "{member} — **{game}**, Main `{char}`: Rank **{rank}** auf Lock-Liste — kein Bot-Rang."
     )
-    gl = game_label(profile_key) if profile_key in ("retail", "mop_classic") else str(profile_key)
+    gl = _profile_game_label(guild_config, profile_key)
     detail_val = detail.strip()
     mapping = {
         "member": member.mention,
