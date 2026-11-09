@@ -87,6 +87,10 @@ class OnMessage:
         # check whether the message author isn't a bot
         if message.author.bot:
             return False
+        # webhook posts and authors missing from the member cache arrive as plain User objects;
+        # Red's ignore check needs a Member and raises AttributeError ('_roles') otherwise
+        if message.webhook_id is not None or not isinstance(message.author, discord.Member):
+            return False
         # check whether the bot can send and delete messages in the given channel
         channel_perms = message.channel.permissions_for(message.guild.me)
         if not channel_perms.send_messages:
